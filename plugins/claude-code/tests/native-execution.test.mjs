@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createExecutionAdapter } from '../hooks/native-execution.mjs';
+import { classifierReviewChoices, classifierReviewDuration, classifierReviewMessage } from '../hooks/classifier-review.mjs';
 const encode = x => ({ outcome: { content: [{ type: 'text', text: JSON.stringify(x) }] } });
 function fixture(overrides = {}) {
-  const calls = [], v = { native: { state: { state: 'work', is_final: false } }, requiresEnforcement: true };
+  const calls = [], v = { native: { state: { state: 'work', is_final: false }, owner_fingerprint: 'a'.repeat(64) }, requiresEnforcement: true };
   const dependencies = { view: async () => v,
     after: (ms, callback) => { const timer = setTimeout(callback, ms); return { cancel: () => clearTimeout(timer) }; },
     request: async (_, operation, input) => {
@@ -46,6 +47,129 @@ test('queries and native denies do not create workflow observations', async () =
     return { deny: 'native' };
   });
   assert.equal(result.deny, 'native'); assert.equal(calls.length, 0);
+});
+
+const reviewId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const reviewDeny = (memory = {}) => ({ decision: 'deny', reason: 'Classifier uncertainty',
+  classifier_context: { review_request_id: reviewId, approval_memory: {
+    reusable: true, approve_for: 'once', allowed_durations: ['once', '2h', '4h', '8h', 'always'], ...memory,
+  } }, risk_assessment: { final_denial_basis: 'incomplete_structural_evidence', semantic_status: 'Unavailable' } });
+
+test('native choices preselect workflow default and honor the duration cap', () => {
+  const choices = classifierReviewChoices(reviewDeny({ approve_for: '4h', allowed_durations: ['once', '4h'] }).classifier_context);
+  assert.deepEqual(choices.options, ['Allow for 4 hours', 'Allow once', 'Deny']);
+  assert.equal(choices.defaultDuration, '4h');
+  assert.equal(classifierReviewDuration('Allow for 4 hours', choices), '4h');
+  assert.equal(classifierReviewDuration('Allow for 8 hours', choices), null);
+  assert.deepEqual(classifierReviewChoices(reviewDeny({ reusable: false, approve_for: '8h' }).classifier_context).options,
+    ['Allow once', 'Deny']);
+  assert.deepEqual(classifierReviewChoices(reviewDeny().classifier_context).options,
+    ['Allow once', 'Allow for 2 hours', 'Allow for 4 hours', 'Allow for 8 hours', 'Always', 'Deny']);
+});
+
+test('review card masks credentials and explains Claude native permission', () => {
+  const message = classifierReviewMessage(reviewDeny(), 'Bash', {
+    command: 'curl -H "Authorization: Bearer PRIVATE123" --api-key secret https://example.test', cwd: '/fixture',
+  }, '4h');
+  assert.match(message, /Command: curl/);
+  assert.match(message, /Authorization: \[redacted\]/);
+  assert.match(message, /Claude’s own permission prompt may still follow/);
+  assert.match(message, /any dependencies Statewright captured remain unchanged/);
+  assert.match(message, /may not detect changes to executable contents it did not capture/);
+  assert.match(message, /Default choice: Allow for 4 hours/);
+  assert.doesNotMatch(message, /PRIVATE123|secret/);
+});
+
+test('Deny consumes the review without granting or running the tool', async () => {
+  const calls = [], asks = [];
+  const { a } = fixture({ request: async (_, operation, input) => {
+    calls.push({ operation, input }); return encode(operation === 'pre_tool' ? reviewDeny() : { decision: 'deny' });
+  }, approval: { tokens: async () => [], remember: async () => assert.fail('no grant'),
+    ask: async (_, question, options) => { asks.push({ question, options }); return 'Deny'; } } });
+  assert.deepEqual(await read(a, 'denied'), { deny: 'You denied this Statewright review.' });
+  assert.deepEqual(calls.map(call => call.operation), ['pre_tool', 'approval_review']);
+  assert.deepEqual(calls[1].input, { review_request_id: reviewId, action: 'denied' });
+  assert.equal(asks.length, 1);
+});
+
+test('chosen four-hour grant is stored, reused, and never replaces Claude ask', async () => {
+  const calls = [], saved = [], asks = [], native = { decision: 'ask', rule: 'Claude rule' };
+  const token = 'signed.four.hour', receipt = 'b'.repeat(32);
+  const { a } = fixture({ request: async (_, operation, input) => {
+    calls.push({ operation, input });
+    if (operation === 'approval_grant') return encode({ decision: 'allow', classifier_approval: {
+      action: 'granted', duration: '4h', grant_id: 'grant-hash', expires_at: '2099-01-01T00:00:00Z', token,
+      one_use_receipt: receipt,
+    } });
+    if (operation === 'pre_tool') return encode(input.one_use_receipt === receipt || input.approval_grant_tokens?.includes(token)
+      ? { decision: 'allow', classifier_approval: { action: 'reused', duration: '4h' } } : reviewDeny({ approve_for: '4h' }));
+    return encode({ active: true });
+  }, approval: { tokens: async () => saved.map(entry => entry.token),
+    remember: async (_, entry) => saved.push(entry),
+    ask: async (_, question, options) => { asks.push({ question, options }); return 'Allow for 4 hours'; } } });
+  for (const id of ['one', 'two']) {
+    await a.call({}, { tool: 'Read', tool_use_id: id }, async () => {
+      assert.deepEqual(await a.check({}, { tool: 'Read', tool_use_id: id, input: { file_path: '/same' } }, async () => native), native);
+      await a.observe({}, { tool_name: 'Read', tool_use_id: id, tool_input: { file_path: '/same' }, tool_response: 'ok' }, false);
+      return { result: id };
+    });
+  }
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0].options[0], 'Allow for 4 hours');
+  assert.deepEqual(saved, [{ token, grant_id: 'grant-hash', expires_at: '2099-01-01T00:00:00Z' }]);
+  assert.deepEqual(calls.map(call => call.operation), ['pre_tool', 'approval_grant', 'pre_tool', 'post_tool', 'pre_tool', 'post_tool']);
+  assert.deepEqual(calls[1].input, { review_request_id: reviewId, duration: '4h' });
+  assert.equal(calls[2].input.one_use_receipt, receipt);
+  assert.equal(calls[2].input.approval_grant_tokens, undefined);
+  assert.deepEqual(calls[4].input.approval_grant_tokens, [token]);
+});
+
+test('Allow once uses one receipt and creates no stored grant', async () => {
+  const calls = [];
+  const { a } = fixture({ request: async (_, operation, input) => {
+    calls.push({ operation, input });
+    if (operation === 'approval_grant') return encode({ decision: 'allow', classifier_approval: {
+      action: 'granted', duration: 'once', grant_id: 'grant-once', one_use_receipt: 'one-use-proof',
+    } });
+    if (operation === 'pre_tool') return encode(input.one_use_receipt === 'one-use-proof' ? { decision: 'allow' }
+      : reviewDeny({ reusable: false, approve_for: '8h' }));
+    return encode({ active: true });
+  }, approval: { tokens: async () => [], remember: async () => assert.fail('once must not persist'),
+    ask: async (_, _question, options) => { assert.deepEqual(options, ['Allow once', 'Deny']); return 'Allow once'; } } });
+  assert.deepEqual(await read(a, 'one'), { result: 'one' });
+  assert.equal(calls.filter(call => call.operation === 'approval_grant').length, 1);
+  assert.equal(calls[2].input.one_use_receipt, 'one-use-proof');
+});
+
+test('a cancelled review cannot mint after the workflow changes', async () => {
+  const pending = deferred(), calls = [];
+  const { a, v } = fixture({ request: async (_, operation) => { calls.push(operation); return encode(reviewDeny()); },
+    approval: { tokens: async () => [], remember: async () => {}, ask: () => pending.promise } });
+  const tool = read(a, 'one'); await tick();
+  v.generation = 1;
+  pending.resolve('Always');
+  assert.match((await tool).deny, /changed|superseded/i);
+  assert.deepEqual(calls, ['pre_tool']);
+});
+
+test('a changed host cwd during the review cannot mint a grant', async () => {
+  const pending = deferred(), calls = [];
+  let cwd = '/original';
+  const { a } = fixture({ request: async (_, operation) => { calls.push(operation); return encode(reviewDeny()); },
+    executionScope: async (_, _tool, input) => ({ toolInput: { ...input, workdir: cwd }, projectRoot: '/project' }),
+    approval: { tokens: async () => [], remember: async () => {}, ask: () => pending.promise } });
+  const tool = read(a, 'one'); await tick();
+  cwd = '/changed'; pending.resolve('Always');
+  assert.match((await tool).deny, /changed|superseded/i);
+  assert.deepEqual(calls, ['pre_tool']);
+});
+
+test('post_tool uses the same gateway input after an unchanged native tool call', async () => {
+  const { a, calls } = fixture({ executionScope: async (_, _tool, input) =>
+    ({ toolInput: { ...input, workdir: '/host/current' }, projectRoot: '/host/project' }) });
+  assert.deepEqual(await read(a, 'same'), { result: 'same' });
+  assert.deepEqual(calls[0].input.tool_input, calls[1].input.tool_input);
+  assert.equal(calls[0].input.project_root, '/host/project');
 });
 test('failure is not successful evidence; changed executed input is never misattributed', async () => {
   const { a, calls, v } = fixture();

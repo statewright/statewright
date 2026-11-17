@@ -922,6 +922,17 @@ test('all mod boundaries reject foreign native context and mutations; own reads 
     assert.ok((await h.fire('mcp.call', { server: SERVER, tool: 'statewright_native_request', args: input }, () => assert.fail())).deny);
   }
 });
+test('model-originated approval_grant is denied before Claude native permission can answer', async () => {
+  const h = await host();
+  const tool = `mcp__plugin_statewright_${SERVER}__statewright_native_request`;
+  const input = { context: { version: 1, conversation_id: CHAT }, operation: 'approval_grant',
+    input: { review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', duration: '4h' }, expected_revision: crypto.randomUUID() };
+  const verdict = await h.fire('tool.check', { tool, tool_use_id: 'model-grant', input },
+    () => assert.fail('model grant must stop before native policy'));
+  assert.equal(verdict.decision, 'deny');
+  assert.match(verdict.reason, /native review prompt/);
+  assert.equal(h.state.asks.length, 0);
+});
 
 // A stateful wire fixture exercises the shipping workspace, not the older
 // separate visual mock. The real Rust/native-host interoperability is separate.
@@ -976,6 +987,154 @@ test('shipping workspace journey: select, Start, check, record, next step, Off',
   assert.equal(h.snapshot.state, null);
   assert.deepEqual(h.state.calls.map(c => c.args.operation).filter(Boolean),
     ['load_workflow', 'pre_tool', 'post_tool', 'stop', 'transition', 'get_state', 'deactivate']);
+});
+test('Bash sends host-observed cwd and project root to the gateway while preserving native input', async () => {
+  const h = await workflowHost();
+  h.$.session.cwd = async () => '/host/current';
+  h.$.session.root = async () => '/host/project';
+  h.snapshot.owner_fingerprint = 'a'.repeat(64);
+  await h.press('start');
+  const input = { command: 'echo hello' };
+  const result = await h.fire('tool.call', { tool: 'Bash', tool_use_id: 'bash-cwd', ...input }, async () => {
+    const verdict = await h.fire('tool.check', { tool: 'Bash', tool_use_id: 'bash-cwd', input }, async () => ({ decision: 'ask' }));
+    assert.equal(verdict.decision, 'deny');
+    return { deny: verdict.reason };
+  });
+  assert.ok(result.deny);
+  const pre = h.state.calls.find(call => call.args.operation === 'pre_tool');
+  assert.equal(pre.args.input.project_root, '/host/project');
+  assert.deepEqual(pre.args.input.tool_input, { command: 'echo hello', workdir: '/host/current' });
+  assert.deepEqual(input, { command: 'echo hello' });
+});
+
+test('plugin-first rollout preserves the older gateway pre_tool wire and verdicts', async () => {
+  const h = await workflowHost();
+  h.$.session.cwd = async () => '/host/current';
+  h.$.session.root = async () => '/host/project';
+  await h.press('start');
+  const readInput = { file_path: '/fixture' };
+  await h.fire('tool.call', { tool: 'Read', tool_use_id: 'old-read', ...readInput }, async () => {
+    assert.equal((await h.fire('tool.check', { tool: 'Read', tool_use_id: 'old-read', input: readInput },
+      async () => ({ decision: 'ask' }))).decision, 'ask');
+    await h.fire('classic.PostToolUse', { tool_name: 'Read', tool_use_id: 'old-read', tool_input: readInput, tool_response: 'ok' });
+    return { result: 'ok' };
+  });
+  const bashInput = { command: 'echo hello' };
+  await h.fire('tool.call', { tool: 'Bash', tool_use_id: 'old-bash', ...bashInput }, async () => {
+    assert.equal((await h.fire('tool.check', { tool: 'Bash', tool_use_id: 'old-bash', input: bashInput },
+      async () => ({ decision: 'ask' }))).decision, 'deny');
+    return { deny: 'gateway denied' };
+  });
+  const pre = h.state.calls.filter(call => call.args.operation === 'pre_tool').map(call => call.args.input);
+  assert.deepEqual(pre, [
+    { tool_name: 'Read', tool_input: readInput },
+    { tool_name: 'Bash', tool_input: bashInput },
+  ]);
+});
+
+test('native four-hour choice persists a scoped token in $.store and reuses it', async () => {
+  const h = await workflowHost(), token = 'signed.native.grant', owner = 'a'.repeat(64);
+  const oneUseReceipt = 'b'.repeat(32);
+  h.$.session.cwd = async () => '/host/current';
+  h.$.session.root = async () => '/host/project';
+  h.snapshot.owner_fingerprint = owner;
+  h.state.answer = 'Allow for 4 hours';
+  await h.press('start');
+  h.state.ask = async () => {
+    const [question, config] = h.state.asks.at(-1);
+    const input = { questions: [{ question, header: config.header,
+      options: config.options.map(label => ({ label, description: '' })), multiSelect: false }] };
+    const native = { decision: 'ask', rule: 'Claude native question' };
+    assert.deepEqual(await h.fire('tool.check', { tool: 'AskUserQuestion', tool_use_id: 'approval-question', input },
+      async () => native, { plugin: 'statewright' }), native);
+    assert.deepEqual(await h.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'approval-question', ...input },
+      async () => ({ result: 'host question' }), { plugin: 'statewright' }), { result: 'host question' });
+    assert.equal((await h.fire('tool.check', { tool: 'AskUserQuestion', tool_use_id: 'forged-question', input },
+      async () => ({ decision: 'ask' }), { plugin: 'statewright' })).decision, 'deny');
+    assert.equal((await h.fire('tool.check', { tool: 'AskUserQuestion', tool_use_id: 'approval-question',
+      input: { questions: [{ ...input.questions[0], question: 'different' }] } },
+    async () => ({ decision: 'ask' }), { plugin: 'statewright' })).decision, 'deny');
+    return 'Allow for 4 hours';
+  };
+  const wire = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
+  const read = h.state.read;
+  h.state.read = async call => {
+    const { operation, input } = call.args;
+    if (operation !== 'pre_tool' && operation !== 'approval_grant') return read(call);
+    if (operation === 'approval_grant') {
+      assert.equal(input.project_root, '/host/project');
+      assert.equal(input.host_cwd, '/host/current');
+    }
+    const outcome = operation === 'approval_grant'
+      ? { decision: 'allow', classifier_approval: { action: 'granted', duration: '4h', grant_id: 'grant-hash',
+        expires_at: '2099-01-01T00:00:00Z', token, one_use_receipt: oneUseReceipt } }
+      : input.one_use_receipt === oneUseReceipt || input.approval_grant_tokens?.includes(token)
+        ? { decision: 'allow', classifier_approval: { action: input.one_use_receipt ? 'consumed' : 'reused', duration: '4h' } }
+        : { decision: 'deny', reason: 'Classifier uncertainty', classifier_context: {
+          review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', approval_memory: {
+            reusable: true, approve_for: '4h', allowed_durations: ['once', '2h', '4h', '8h', 'always'],
+          } }, risk_assessment: { final_denial_basis: 'incomplete_structural_evidence' } };
+    h.snapshot.revision = crypto.randomUUID();
+    return wire({ ...h.snapshot, outcome: wire(outcome) });
+  };
+  const input = { command: 'echo hello' };
+  for (const id of ['first-grant', 'reused-grant']) {
+    const result = await h.fire('tool.call', { tool: 'Bash', tool_use_id: id, ...input }, async () => {
+      const permission = await h.fire('tool.check', { tool: 'Bash', tool_use_id: id, input }, async () => ({ decision: 'ask' }));
+      assert.equal(permission.decision, 'ask');
+      await h.fire('classic.PostToolUse', { tool_name: 'Bash', tool_use_id: id, tool_input: input, tool_response: 'ok' });
+      return { result: id };
+    });
+    assert.deepEqual(result, { result: id });
+  }
+  assert.equal(h.state.asks.length, 1);
+  assert.deepEqual(h.state.asks[0][1].options[0], 'Allow for 4 hours');
+  assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), [{ scope: `owner:${owner}:project:/host/project`,
+    token, grant_id: 'grant-hash', expires_at: '2099-01-01T00:00:00Z' }]);
+  assert.equal(h.state.calls.filter(call => call.args.operation === 'approval_grant').length, 1);
+});
+
+test('disconnected revocation clears all stored tokens and says so', async () => {
+  const h = await host();
+  const other = { scope: 'owner:other:project:/other', token: 'other-signed', grant_id: 'other-hash', expires_at: null };
+  h.stored.set('classifier-approval-grants:v1', [
+    { scope: `conversation:${CHAT}`, token: 'signed', grant_id: 'hash', expires_at: null }, other,
+  ]);
+  const result = await h.fire('command.run', { command: 'statewright', args: 'approvals revoke' });
+  assert.match(result.text, /across all projects/);
+  assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), []);
+});
+
+test('connected revocation clears only the current owner and project', async () => {
+  const h = await workflowHost(), owner = 'a'.repeat(64);
+  h.snapshot.owner_fingerprint = owner;
+  h.$.session.root = async () => '/current';
+  await h.press('start');
+  const other = { scope: 'owner:other:project:/other', token: 'other-signed', grant_id: 'other-hash', expires_at: null };
+  h.stored.set('classifier-approval-grants:v1', [
+    { scope: `owner:${owner}:project:/current`, token: 'signed', grant_id: 'hash', expires_at: null }, other,
+  ]);
+  const result = await h.fire('command.run', { command: 'statewright', args: 'approvals revoke' });
+  assert.match(result.text, /for this project/);
+  assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), [other]);
+});
+
+test('missing host project root sends no token from another conversation or owner', async () => {
+  const h = await workflowHost();
+  h.snapshot.owner_fingerprint = 'a'.repeat(64);
+  h.stored.set('classifier-approval-grants:v1', [{ scope: `owner:${'a'.repeat(64)}:project:/other`,
+    token: 'other-signed', grant_id: 'other-hash', expires_at: null }]);
+  await h.press('start');
+  await h.fire('tool.call', { tool: 'Read', tool_use_id: 'no-root', file_path: '/fixture' }, async () => {
+    const verdict = await h.fire('tool.check', { tool: 'Read', tool_use_id: 'no-root', input: { file_path: '/fixture' } },
+      async () => ({ decision: 'ask' }));
+    assert.equal(verdict.decision, 'ask');
+    await h.fire('classic.PostToolUse', { tool_name: 'Read', tool_use_id: 'no-root',
+      tool_input: { file_path: '/fixture' }, tool_response: 'ok' });
+    return { result: 'ok' };
+  });
+  const pre = h.state.calls.find(call => call.args.operation === 'pre_tool');
+  assert.equal(pre.args.input.approval_grant_tokens, undefined);
 });
 test('sidebar Start followed by the same named workflow request reads state without a duplicate load', async () => {
   const h = await workflowHost(); await h.press('start');

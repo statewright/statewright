@@ -82,7 +82,19 @@ struct Transition {
 struct PreTool {
     tool_name: String,
     tool_input: serde_json::Map<String, Value>,
+    #[serde(default)]
+    approval_grant_tokens: Vec<String>,
+    #[serde(default)]
+    one_use_receipt: Option<String>,
+    #[serde(default)]
+    project_root: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalGrant { review_request_id:String, duration:String, project_root:Option<String>, host_cwd:Option<String> }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalReview { review_request_id:String, action:String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PostTool {
@@ -94,6 +106,13 @@ struct PostTool {
 
 fn valid_label(value: &str) -> bool {
     !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
+}
+fn valid_project_root(value:&str)->bool {
+    let bytes=value.as_bytes();
+    let absolute=value.starts_with('/') || value.starts_with("\\\\")
+        || (bytes.len()>=3 && bytes[0].is_ascii_alphabetic() && bytes[1]==b':'
+            && matches!(bytes[2],b'/'|b'\\'));
+    absolute && value.len()<=4096 && !value.chars().any(char::is_control)
 }
 pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'static str> {
     let request: Request =
@@ -140,6 +159,10 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
                 .map_err(|_| "Invalid native pre-tool input")?;
             if !valid_label(&input.tool_name)
                 || input.tool_name.contains("statewright_")
+                || input.approval_grant_tokens.len()>64
+                || input.approval_grant_tokens.iter().any(|token|token.len()>2048)
+                || input.one_use_receipt.as_ref().is_some_and(|receipt|receipt.len()!=32 || !receipt.bytes().all(|byte|byte.is_ascii_hexdigit()))
+                || input.project_root.as_deref().is_some_and(|root|!valid_project_root(root))
                 || serde_json::to_string(&input.tool_input)
                     .unwrap_or_default()
                     .len()
@@ -147,7 +170,27 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
             {
                 return Err("Invalid native tool observation");
             }
-            "statewright_adapter_pre_tool"
+            "statewright_native_pre_tool"
+        }
+        "approval_grant" => {
+            let input:ApprovalGrant=serde_json::from_value(request.input.clone())
+                .map_err(|_|"Invalid classifier approval grant input")?;
+            if input.review_request_id.len()!=32 || !input.review_request_id.bytes().all(|byte|byte.is_ascii_hexdigit())
+                || !matches!(input.duration.as_str(),"once"|"2h"|"4h"|"8h"|"always")
+                || input.project_root.as_deref().is_some_and(|root|!valid_project_root(root))
+                || input.host_cwd.as_deref().is_some_and(|cwd|!valid_project_root(cwd)) {
+                return Err("Invalid classifier approval grant input");
+            }
+            "statewright_native_approval_grant"
+        }
+        "approval_review" => {
+            let input:ApprovalReview=serde_json::from_value(request.input.clone())
+                .map_err(|_|"Invalid classifier review outcome")?;
+            if input.review_request_id.len()!=32 || !input.review_request_id.bytes().all(|byte|byte.is_ascii_hexdigit())
+                || !matches!(input.action.as_str(),"denied"|"unavailable") {
+                return Err("Invalid classifier review outcome");
+            }
+            "statewright_native_approval_review"
         }
         "post_tool" => {
             let input: PostTool = serde_json::from_value(request.input.clone())
@@ -182,12 +225,12 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
 pub(super) fn definition() -> ToolInfo {
     ToolInfo { name: TOOL.into(), annotations: Some(ToolAnnotations { read_only_hint: Some(false),
         destructive_hint: Some(false), idempotent_hint: Some(false), open_world_hint: Some(false), ..Default::default() }),
-        description: Some("Versioned native workspace control. The host supplies its current conversation context. Approval requests open a native human form; no decision or arbitrary tool execution is accepted as input. Read get_state before a mutation; never retry a mutation without readback.".into()),
+        description: Some("Versioned native workspace control. The host supplies its current conversation context. Workflow approval requests open a native human form and do not accept a decision as input. Classifier approval_grant and approval_review are reserved for the plugin hook immediately after a host-native human choice and require a gateway-issued one-use review request ID; model calls are denied by the hook. Read get_state before a mutation; never retry a mutation without readback.".into()),
         input_schema: json!({"type":"object","additionalProperties":false,
           "properties": {"context":{"type":"object","additionalProperties":false,
             "properties":{"version":{"type":"integer","enum":[1]},"conversation_id":{"type":"string","format":"uuid"}},
             "required":["version","conversation_id"]},
-          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval","pre_tool","post_tool","stop"]},
+          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval","pre_tool","post_tool","stop","approval_grant","approval_review"]},
           "input":{"type":"object"},"expected_revision":{"type":["string","null"]}},
           "required":["context","operation","input"]}) }
 }
@@ -334,6 +377,8 @@ pub(super) async fn handle(
         .map(str::to_string)
         .collect();
     let namespace = identity.namespace(&state.authorization_server_url, &validated.owner_id);
+    let owner_fingerprint=crate::approval_memory::digest(&json!([
+        validated.owner_id,identity.principal,identity.resource]));
     let session_key = format!("{}__{}", namespace, native.context.conversation_id);
     let manager = state.get_session_manager(&namespace).await;
     // Only synchronous creation occurs while publishing. No exists/create race:
@@ -359,6 +404,7 @@ pub(super) async fn handle(
                 state.db_pool.clone(),
             );
             gateway.set_remote_host_model_control(true);
+            gateway.set_native_owner_fingerprint(owner_fingerprint.clone());
             let (tx, _rx) = mpsc::channel(1);
             let session = Arc::new(Mutex::new(RemoteSession {
                 gateway,
@@ -393,6 +439,7 @@ pub(super) async fn handle(
             .set_plan_limit(&machine_id, limit);
     }
     session.gateway.refresh_native_catalog(validated.workflows);
+    session.gateway.set_native_owner_fingerprint(owner_fingerprint);
     if tool != "statewright_get_state"
         && native.expected_revision.as_deref() != Some(&session.native_revision)
     {
@@ -412,7 +459,30 @@ pub(super) async fn handle(
     let outcome = if tool == "statewright_get_state" {
         Value::Null
     } else {
-        let result = invoke(&mut session.gateway, tool, native.input).await;
+        let result = match tool {
+            "statewright_native_pre_tool" => {
+                let input:PreTool=serde_json::from_value(native.input).expect("validated native pre-tool");
+                let proofs=crate::classifier_grants::NativeProofs{
+                    tokens:input.approval_grant_tokens,
+                    one_use_receipt:input.one_use_receipt,
+                    project_root:input.project_root,
+                };
+                let decision=session.gateway.native_pre_tool(&input.tool_name,&Value::Object(input.tool_input),&proofs).await;
+                serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
+            }
+            "statewright_native_approval_grant" => {
+                let input:ApprovalGrant=serde_json::from_value(native.input).expect("validated native grant");
+                let decision=session.gateway.native_approval_grant(&input.review_request_id,&input.duration,
+                    input.project_root.as_deref(),input.host_cwd.as_deref()).await;
+                serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
+            }
+            "statewright_native_approval_review" => {
+                let input:ApprovalReview=serde_json::from_value(native.input).expect("validated native review");
+                let decision=session.gateway.native_approval_review(&input.review_request_id,&input.action).await;
+                serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
+            }
+            _ => invoke(&mut session.gateway, tool, native.input).await,
+        };
         if tool == "statewright_deactivate" && result["isError"] != true {
             // A late authenticated browser callback must not advance a run the
             // owner has stopped. Retire its exact pending transition as well.
@@ -470,6 +540,7 @@ pub(super) async fn snapshot(
     };
     let result = json!({"protocol_version":1,"conversation_id":chat,
         "revision":session.native_revision,"state":current,"outcome":outcome,
+        "owner_fingerprint":session.gateway.native_owner_fingerprint(),
         "workflow_aliases":session.gateway.workflow_aliases(),
         "telemetry_consent":session.telemetry_consent,
         "capabilities":{"workflow_control":true,"native_tool_enforcement":true,"human_approval":true,"model_routing":false},
@@ -478,4 +549,26 @@ pub(super) async fn snapshot(
         id,
         serde_json::to_value(ToolCallResult::text(result.to_string())).unwrap(),
     )
+}
+
+#[cfg(test)]
+mod classifier_native_tests {
+    use super::*;
+    fn request(operation:&str,input:Value)->Value {
+        json!({"context":{"version":1,"conversation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+            "operation":operation,"input":input,"expected_revision":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"})
+    }
+    #[test]
+    fn review_operations_are_native_only_and_validate_bounds() {
+        assert_eq!(parse(request("approval_grant",json!({"review_request_id":"a".repeat(32),
+            "duration":"4h","project_root":"C:\\workspace"}))).unwrap().1,"statewright_native_approval_grant");
+        assert_eq!(parse(request("approval_review",json!({"review_request_id":"a".repeat(32),
+            "action":"denied"}))).unwrap().1,"statewright_native_approval_review");
+        assert!(parse(request("approval_grant",json!({"review_request_id":"a".repeat(32),
+            "duration":"1d"}))).is_err());
+        assert!(parse(request("pre_tool",json!({"tool_name":"Bash","tool_input":{},
+            "approval_grant_tokens":vec!["x";65]}))).is_err());
+        assert!(valid_project_root("\\\\host\\share"));
+        assert!(!valid_project_root("relative/path"));
+    }
 }

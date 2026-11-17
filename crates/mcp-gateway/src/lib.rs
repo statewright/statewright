@@ -1,5 +1,6 @@
 mod approval_origin;
 mod approval_memory;
+mod classifier_grants;
 pub mod classifier_audit;
 pub mod classifier_audit_store;
 pub mod bash_classifier;

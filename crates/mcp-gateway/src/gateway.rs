@@ -162,6 +162,8 @@ pub struct Gateway {
     host_client_name: Option<String>,
     classifier_environment: Option<String>,
     classifier_audit_root: Option<std::path::PathBuf>,
+    classifier_grants: crate::classifier_grants::ClassifierGrants,
+    native_owner_fingerprint: Option<String>,
     #[cfg(test)]
     classifier_assessment_pause: Option<(tokio::sync::oneshot::Sender<()>,tokio::sync::oneshot::Receiver<()>)>,
     #[cfg(test)]
@@ -282,6 +284,7 @@ impl Gateway {
         owner_id: String,
         db_pool: crate::DbPool,
     ) -> Self {
+        let durable_approval_history=cfg!(feature="metering") && db_pool.is_some();
         Self {
             session_manager,
             upstream,
@@ -304,6 +307,8 @@ impl Gateway {
             host_client_name: None,
             classifier_environment: std::env::var("STATEWRIGHT_ENV").ok(),
             classifier_audit_root: std::env::var_os("STATEWRIGHT_CLASSIFIER_AUDIT_DIR").map(Into::into),
+            classifier_grants: crate::classifier_grants::ClassifierGrants::new(durable_approval_history),
+            native_owner_fingerprint: None,
             #[cfg(test)]
             classifier_assessment_pause: None,
             #[cfg(test)]
@@ -646,11 +651,175 @@ impl Gateway {
     pub(crate) fn refresh_native_catalog(&mut self, workflows: HashMap<String, MachineDefinition>) {
         self.workflows = workflows;
     }
+    pub(crate) fn set_native_owner_fingerprint(&mut self, fingerprint:String) {
+        self.native_owner_fingerprint=Some(fingerprint);
+    }
+    pub(crate) fn native_owner_fingerprint(&self)->Option<&str> {
+        self.native_owner_fingerprint.as_deref()
+    }
 
     /// Native hooks own their own continuation UX. Remote hosts without that
     /// channel receive MCP guidance; this is presentation only, never policy.
     pub fn set_web_workflow_guidance(&mut self, enabled: bool) {
         self.web_workflow_guidance = enabled;
+    }
+
+    fn approval_project_scope(&self, root:Option<&str>) -> String {
+        // A host-observed root is hashed so a grant cannot move between
+        // projects. Without one, the authenticated conversation is narrower.
+        root.map(|root|crate::approval_memory::digest(&json!(root)))
+            .or_else(||self.project_id.clone())
+            .unwrap_or_else(||self.transport_session_id.clone())
+    }
+
+    fn classifier_approval_event(action:&str,review:&crate::classifier_grants::Review,
+        approval:Option<&serde_json::Value>) -> serde_json::Value {
+        json!({"schema":"statewright/classifier-approval-lifecycle/v1",
+            "provider":"claude-code","host":"claude-code","action":action,
+            "type":match action {"requested"=>"classifier_human_approval_requested",
+                "granted"=>"classifier_human_approval_granted","denied"=>"classifier_human_approval_denied",
+                "memory_created"=>"classifier_approval_memory_created",
+                "memory_reused"=>"classifier_approval_memory_reused",
+                _=>"classifier_approval_memory_unavailable"},
+            "approval_request_id":review.id,"review_request_id":review.id,
+            "duration":approval.and_then(|value|value["duration"].as_str()),
+            "chosen_duration":approval.and_then(|value|value["duration"].as_str()),
+            "default_duration":review.default_duration,
+            "expires_at":approval.map(|value|value["expires_at"].clone()).unwrap_or_else(||
+                json!(chrono::DateTime::<chrono::Utc>::from_timestamp_millis(review.expires_at_ms).map(|date|date.to_rfc3339()))),
+            "grant_id":approval.map(|value|value["grant_id"].clone()).unwrap_or(serde_json::Value::Null),
+            "fingerprints":review.binding.event_fields(),
+            "policy_sha256":review.policy_sha256,
+            "grant_policy_v2_sha256":review.grant_policy_v2_sha256,
+            "invocation_fingerprint":review.invocation_fingerprint,
+            "invocation_sha256":review.binding.event_fields()["invocation_sha256"],
+            "dependency_sha256":review.binding.event_fields()["dependency_sha256"],
+            "owner_id":review.owner,
+            "project_id":review.project,"run_id":review.run,"run_session_id":review.session,
+            "state_epoch":review.state_epoch,"occurred_at":chrono::Utc::now().to_rfc3339()})
+    }
+    async fn record_classifier_approval_events(&self, actions:&[&str],
+        review:&crate::classifier_grants::Review, approval:Option<&serde_json::Value>) -> bool {
+        let events:Vec<_>=actions.iter().map(|action|Self::classifier_approval_event(action,review,approval)).collect();
+        #[cfg(feature="metering")]
+        if let Some(pool)=&self.db_pool {
+            let saved=async {
+                let mut transaction=pool.begin().await?;
+                for (action,event) in actions.iter().zip(&events) {
+                    sqlx::query("INSERT INTO statewright_events.classifier_approval_history(id,owner_id,run_id,run_session_id,action,payload) VALUES($1,$2,$3,$4,$5,$6)")
+                        .bind(format!("evt_{}",uuid::Uuid::new_v4())).bind(&review.owner).bind(&review.run)
+                        .bind(&review.session).bind(action).bind(event).execute(&mut *transaction).await?;
+                }
+                transaction.commit().await
+            }.await;
+            if saved.is_err() {
+                tracing::error!(event="classifier_approval_history_unavailable", "Classifier approval history was not persisted");
+                return false;
+            }
+        }
+        for event in events { tracing::info!(event="classifier_approval_lifecycle", payload=%event,
+            "Classifier approval lifecycle"); }
+        true
+    }
+    async fn record_classifier_approval_event(&self, action:&str,
+        review:&crate::classifier_grants::Review, approval:Option<&serde_json::Value>) -> bool {
+        self.record_classifier_approval_events(&[action],review,approval).await
+    }
+
+    pub(crate) async fn native_approval_review(&mut self, id:&str, action:&str) -> serde_json::Value {
+        if !matches!(action,"denied"|"unavailable") {
+            return json!({"decision":"deny","reason":"Invalid review outcome"});
+        }
+        let Some(review)=self.classifier_grants.consume_review(id) else {
+            return json!({"decision":"deny","reason":"Review request unavailable or expired"});
+        };
+        if review.owner!=self.owner_id || review.session!=self.transport_session_id {
+            return json!({"decision":"deny","reason":"Review request identity changed"});
+        }
+        if self.current_run_id.as_deref()!=Some(&review.run) || review.state_epoch!=self.usage.state_epoch() {
+            return json!({"decision":"deny","reason":"Review request workflow context changed"});
+        }
+        if !self.record_classifier_approval_event(action,&review,None).await {
+            return json!({"decision":"deny","reason":"Classifier approval history unavailable"});
+        }
+        json!({"decision":"deny","classifier_approval":{"action":action,"review_request_id":id}})
+    }
+
+    pub(crate) async fn native_approval_grant(&mut self, id:&str, duration:&str,
+        project_root:Option<&str>,host_cwd:Option<&str>) -> serde_json::Value {
+        let Some(review)=self.classifier_grants.consume_review(id) else {
+            return json!({"decision":"deny","reason":"Review request unavailable or expired"});
+        };
+        let current=self.session_manager.get(&self.session_id);
+        let Some(session)=current else {
+            return json!({"decision":"deny","reason":"Workflow session unavailable"});
+        };
+        if review.owner!=self.owner_id || review.session!=self.transport_session_id
+            || review.project!=self.approval_project_scope(project_root)
+            || self.current_run_id.as_deref()!=Some(&review.run)
+            || review.state_epoch!=self.usage.state_epoch() || review.state!=session.current_state
+            || review.generation!=session.generation || review.transition_count!=session.transition_count
+            || session.pending_approval.is_some() || self.active_workflow.is_none() {
+            return json!({"decision":"deny","reason":"Review request workflow context changed"});
+        }
+        let expected_cwd=if crate::tool_intent::native_tool_family(&review.tool_name)
+            ==Some(crate::tool_intent::NativeToolFamily::Command) {
+            review.tool_input.get("workdir").or_else(||review.tool_input.get("cwd"))
+                .and_then(serde_json::Value::as_str)
+        }else{None};
+        if expected_cwd.is_some() && expected_cwd!=host_cwd {
+            return json!({"decision":"deny","reason":"Host working directory changed during review"});
+        }
+        if !review.allowed_durations.iter().any(|allowed|allowed==duration) {
+            return json!({"decision":"deny","reason":"Approval duration is outside workflow policy"});
+        }
+        if duration!="once" && !self.classifier_grants.has_key() {
+            return json!({"decision":"deny","reason":"Reusable approval key unavailable"});
+        }
+        let intent=session.definition.states.get(&session.current_state)
+            .and_then(|state|state.intent.as_deref());
+        let registered_tool=match self.upstream.tool_info(&review.tool_name) {
+            Ok(value)=>value,Err(_)=>return json!({"decision":"deny","reason":"Tool registration changed"})
+        };
+        let pipeline=risk_assessment::assess_native_pipeline_visible_with_evidence(
+            registered_tool,&review.tool_name,&review.tool_input,intent,None,None).await;
+        #[cfg(test)]
+        if let Some((entered,resume))=self.classifier_assessment_pause.take(){let _=entered.send(());let _=resume.await;}
+        let Some(current)=self.session_manager.get(&self.session_id) else {
+            return json!({"decision":"deny","reason":"Workflow session disappeared during approval review"});
+        };
+        if !same_classifier_snapshot(&session,&current) || current.pending_approval.is_some() {
+            return json!({"decision":"deny","reason":"Workflow changed during approval review"});
+        }
+        let session=current;
+        if pipeline.resolve_effect()!=risk_assessment::ResolvedEffect::DenyUncertain {
+            return json!({"decision":"deny","reason":"Classifier assessment changed"});
+        }
+        let context=crate::approval_memory::context(&session,&review.tool_name,&review.tool_input,None,None,
+            pipeline.deterministic.source,registered_tool.is_none(),pipeline.complete_resource_bounds().is_some());
+        if crate::classifier_grants::Binding::from_context(&context).as_ref()!=Some(&review.binding) {
+            return json!({"decision":"deny","reason":"Approval policy or dependencies changed"});
+        }
+        if duration!="once" && context["reusable"]!=true {
+            return json!({"decision":"deny","reason":"Reusable dependency provenance unavailable"});
+        }
+        let policy_name=enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+            &session,&review.tool_name,&review.tool_input,Some(&pipeline),
+            if registered_tool.is_some(){enforcement::AdapterToolOrigin::RegisteredUpstream}
+            else{enforcement::AdapterToolOrigin::NativeUnregistered});
+        if !matches!(enforcement::enforce_tool_call(&session,&policy_name),EnforcementDecision::Allow|EnforcementDecision::CheckpointReached{..})
+            || matches!(interceptors::classifier_approval_policy_check(&session,&review.tool_name,&review.tool_input,&pipeline),PreCallDecision::Block(_)) {
+            return json!({"decision":"deny","reason":"Independent workflow policy changed"});
+        }
+        let receipt=match self.classifier_grants.grant(review.clone(),duration) {
+            Ok(value)=>value,Err(reason)=>return json!({"decision":"deny","reason":reason})
+        };
+        let approval=&receipt.payload["classifier_approval"];
+        let actions:&[&str]=if duration=="once"{&["granted"]}else{&["granted","memory_created"]};
+        if !self.record_classifier_approval_events(actions,&review,Some(approval)).await {
+            return json!({"decision":"deny","reason":"Classifier approval history unavailable"});
+        }
+        receipt.payload
     }
 
     fn uses_web_workflow_guidance(&self) -> bool {
@@ -1732,6 +1901,22 @@ impl Gateway {
         command_evidence: Option<&serde_json::Value>,
         command_references: Option<&serde_json::Value>,
     ) -> serde_json::Value {
+        self.adapter_pre_tool_with_native_proofs(tool_name,tool_input,command_evidence,command_references,None).await
+    }
+
+    pub(crate) async fn native_pre_tool(&mut self, tool_name:&str, tool_input:&serde_json::Value,
+        proofs:&crate::classifier_grants::NativeProofs) -> serde_json::Value {
+        self.adapter_pre_tool_with_native_proofs(tool_name,tool_input,None,None,Some(proofs)).await
+    }
+
+    async fn adapter_pre_tool_with_native_proofs(
+        &mut self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        command_evidence: Option<&serde_json::Value>,
+        command_references: Option<&serde_json::Value>,
+        native_proofs: Option<&crate::classifier_grants::NativeProofs>,
+    ) -> serde_json::Value {
         if self.active_workflow.is_none() {
             return json!({"decision": "allow", "active": false});
         }
@@ -1962,15 +2147,59 @@ impl Gateway {
                                 "risk_assessment":pipeline.visible_json_for_denial(denial.basis,denial.required_authority)});
                         }
                     }
+                    let mut memory=crate::approval_memory::context(&session, tool_name,
+                        tool_input, command_evidence, command_references,
+                        pipeline.deterministic.source, registered_tool.is_none(),pipeline.complete_resource_bounds().is_some());
+                    let mut review_request_id=None;
+                    if let Some(proofs)=native_proofs {
+                        let project=self.approval_project_scope(proofs.project_root.as_deref());
+                        if let Some(binding)=crate::classifier_grants::Binding::from_context(&memory) {
+                            let approval=proofs.one_use_receipt.as_deref().and_then(|receipt|
+                                self.classifier_grants.use_once(receipt,&self.owner_id,&project,run_id,
+                                    &self.transport_session_id,self.usage.state_epoch(),&binding))
+                                .or_else(||if memory["reusable"]==true {
+                                    self.classifier_grants.reuse(&proofs.tokens,&self.owner_id,&project,&binding)
+                                }else{None});
+                            if let Some(approval)=approval {
+                                if let Some(mut review)=crate::classifier_grants::Review::new(
+                                    self.owner_id.clone(),project.clone(),run_id.clone(),
+                                    self.transport_session_id.clone(),session.current_state.clone(),
+                                    self.usage.state_epoch(),session.generation.clone(),session.transition_count,
+                                    &memory,tool_name,tool_input,self.classifier_grants.has_key()) {
+                                    if let Some(id)=approval["review_request_id"].as_str(){review.id=id.into();}
+                                    review.invocation_fingerprint=pipeline.visible_json()["invocation_fingerprint"].as_str().map(str::to_owned);
+                                    if approval["action"]=="reused"
+                                        && !self.record_classifier_approval_event("memory_reused",&review,Some(&approval)).await {
+                                        return json!({"decision":"deny","reason":"Classifier approval history unavailable.","denial_stage":"classifier_approval_history"});
+                                    }
+                                }
+                                return json!({"decision":"allow","state":session.current_state,
+                                    "classifier_approval":approval,"risk_assessment":pipeline.visible_json()});
+                            }
+                        }
+                        if let Some(mut review)=crate::classifier_grants::Review::new(
+                            self.owner_id.clone(),project,run_id.clone(),self.transport_session_id.clone(),
+                            session.current_state.clone(),self.usage.state_epoch(),session.generation.clone(),
+                            session.transition_count,&memory,tool_name,tool_input,self.classifier_grants.has_key()) {
+                            review.invocation_fingerprint=pipeline.visible_json()["invocation_fingerprint"].as_str().map(str::to_owned);
+                            review.memory_context(&mut memory);
+                            if !self.record_classifier_approval_event("requested",&review,None).await {
+                                return json!({"decision":"deny","reason":"Classifier approval history unavailable.","denial_stage":"classifier_approval_history"});
+                            }
+                            if !self.classifier_grants.has_key() {
+                                let _=self.record_classifier_approval_event("unavailable",&review,None).await;
+                            }
+                            review_request_id=Some(self.classifier_grants.issue(review));
+                        }
+                    }
                     classifier_context = Some(json!({
                         "run_id": run_id,
                         "run_session_id": self.transport_session_id,
                         "state": session.current_state,
                         "state_epoch": self.usage.state_epoch(),
                         "session_generation": session.generation,
-                        "approval_memory": crate::approval_memory::context(&session, tool_name,
-                            tool_input, command_evidence, command_references,
-                            pipeline.deterministic.source, registered_tool.is_none(),pipeline.complete_resource_bounds().is_some()),
+                        "review_request_id":review_request_id,
+                        "approval_memory":memory,
                     }));
                 }
             }
@@ -8350,6 +8579,163 @@ mod tests {
             assert_eq!(gateway.session_manager.get("approval-session").unwrap().current_state, "inspect", "{label}");
             assert_eq!(gateway.usage.state_epoch(), epoch, "{label}");
         }
+    }
+
+    fn native_classifier_review_gateway() -> Gateway {
+        let definition:MachineDefinition=serde_json::from_value(json!({
+            "id":"native-review","initial":"work",
+            "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+            "meta":{"classifier_policy":{"risk_tolerance":"assessed_moderate_local"},
+                "approval_memory":{"approve_for":"4h"}},
+            "states":{"work":{},"next":{}}
+        })).unwrap();
+        let manager=SessionManager::new();manager.create("native-review".into(),definition.clone());
+        let mut gateway=Gateway::new(manager,UpstreamManager::mock(vec![]),"native-review".into(),
+            HashMap::from([("native-review".into(),definition)]),Some("native-review".into()),
+            "review-owner".into(),None);
+        gateway.current_run_id=Some("review-run".into());gateway
+    }
+    fn native_proofs(receipt:Option<&str>)->crate::classifier_grants::NativeProofs {
+        crate::classifier_grants::NativeProofs{tokens:Vec::new(),one_use_receipt:receipt.map(str::to_owned),
+            project_root:Some("/workspace".into())}
+    }
+    #[tokio::test]
+    async fn native_review_id_only_after_classifier_and_policy_clearance() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let mut gateway=native_classifier_review_gateway();
+        let eligible=gateway.native_pre_tool("Bash",&json!({"command":"unknown_fixture --inspect",
+            "workdir":"/workspace"}),&native_proofs(None)).await;
+        assert_eq!(eligible["decision"],"deny","{eligible}");
+        assert!(eligible["classifier_context"]["review_request_id"].as_str().is_some(),"{eligible}");
+        assert_eq!(eligible["classifier_context"]["approval_memory"]["allowed_durations"],json!(["once"]));
+        assert_eq!(eligible["classifier_context"]["approval_memory"]["approve_for"],"once");
+        let known=gateway.native_pre_tool("Bash",&json!({"command":"rm fixture",
+            "workdir":"/workspace"}),&native_proofs(None)).await;
+        assert!(known["classifier_context"].is_null(),"{known}");
+        let mut session=gateway.session_manager.get("native-review").unwrap();
+        session.definition.states.get_mut("work").unwrap().disallowed_tools=Some(vec!["Bash".into()]);
+        gateway.session_manager.restore(session);
+        let denied=gateway.native_pre_tool("Bash",&json!({"command":"unknown_fixture --inspect",
+            "workdir":"/workspace"}),&native_proofs(None)).await;
+        assert!(denied["classifier_context"].is_null(),"{denied}");
+    }
+    #[tokio::test]
+    async fn native_once_grant_consumes_request_and_exact_next_invocation() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let mut gateway=native_classifier_review_gateway();
+        let input=json!({"command":"unknown_fixture --inspect","workdir":"/workspace"});
+        let deny=gateway.native_pre_tool("Bash",&input,&native_proofs(None)).await;
+        let id=deny["classifier_context"]["review_request_id"].as_str().unwrap();
+        assert_eq!(gateway.native_approval_grant("missing","once",Some("/workspace"),Some("/workspace")).await["decision"],"deny");
+        assert_eq!(gateway.native_approval_grant(id,"4h",Some("/workspace"),Some("/workspace")).await["decision"],"deny");
+        assert_eq!(gateway.native_approval_grant(id,"once",Some("/workspace"),Some("/workspace")).await["decision"],"deny");
+        let deny=gateway.native_pre_tool("Bash",&input,&native_proofs(None)).await;
+        let id=deny["classifier_context"]["review_request_id"].as_str().unwrap();
+        let grant=gateway.native_approval_grant(id,"once",Some("/workspace"),Some("/workspace")).await;
+        assert_eq!(grant["decision"],"allow","{grant}");
+        let receipt=grant["classifier_approval"]["one_use_receipt"].as_str().unwrap();
+        let wrong=gateway.native_pre_tool("Bash",&json!({"command":"unknown_fixture --other",
+            "workdir":"/workspace"}),&native_proofs(Some(receipt))).await;
+        assert_eq!(wrong["decision"],"deny");
+        let retry=gateway.native_pre_tool("Bash",&input,&native_proofs(Some(receipt))).await;
+        assert_eq!(retry["decision"],"deny","receipt consumed on mismatched invocation");
+        let deny=gateway.native_pre_tool("Bash",&input,&native_proofs(None)).await;
+        let id=deny["classifier_context"]["review_request_id"].as_str().unwrap();
+        let grant=gateway.native_approval_grant(id,"once",Some("/workspace"),Some("/workspace")).await;
+        let receipt=grant["classifier_approval"]["one_use_receipt"].as_str().unwrap();
+        let retry=gateway.native_pre_tool("Bash",&input,&native_proofs(Some(receipt))).await;
+        assert_eq!(retry["decision"],"allow","{retry}");
+        assert_eq!(retry["classifier_approval"]["action"],"consumed");
+        let second=gateway.native_pre_tool("Bash",&input,&native_proofs(Some(receipt))).await;
+        assert_eq!(second["decision"],"deny");
+    }
+    #[tokio::test]
+    async fn native_grant_rechecks_owner_project_policy_and_dependencies() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let input=json!({"command":"unknown_fixture --inspect","workdir":"/workspace"});
+        for scenario in ["foreign_owner","foreign_project","changed_cwd","changed_policy","changed_dependency"] {
+            let mut gateway=native_classifier_review_gateway();
+            let deny=gateway.native_pre_tool("Bash",&input,&native_proofs(None)).await;
+            let id=deny["classifier_context"]["review_request_id"].as_str().unwrap().to_owned();
+            match scenario {
+                "foreign_owner"=>gateway.owner_id="foreign".into(),
+                "changed_policy"=>{
+                    let mut session=gateway.session_manager.get("native-review").unwrap();
+                    session.definition.meta.as_mut().unwrap().extra.insert("approval_memory".into(),
+                        json!({"approve_for":"once","allowed_durations":["once"]}));
+                    gateway.session_manager.restore(session);
+                },
+                "changed_dependency"=>gateway.classifier_grants.change_dependency_for_test(&id),
+                _=>{},
+            }
+            let project=if scenario=="foreign_project"{Some("/different")}else{Some("/workspace")};
+            let cwd=if scenario=="changed_cwd"{Some("/different")}else{Some("/workspace")};
+            let result=gateway.native_approval_grant(&id,"once",project,cwd).await;
+            assert_eq!(result["decision"],"deny","{scenario}: {result}");
+            assert_eq!(gateway.native_approval_grant(&id,"once",project,cwd).await["decision"],"deny","{scenario} must consume id");
+        }
+    }
+    #[tokio::test]
+    async fn native_grant_rejects_policy_change_during_fresh_assessment() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let mut gateway=native_classifier_review_gateway();
+        let input=json!({"command":"unknown_fixture --inspect","workdir":"/workspace"});
+        let deny=gateway.native_pre_tool("Bash",&input,&native_proofs(None)).await;
+        let id=deny["classifier_context"]["review_request_id"].as_str().unwrap().to_owned();
+        let manager=gateway.session_manager.clone();
+        let (entered,enter)=tokio::sync::oneshot::channel();
+        let (resume,release)=tokio::sync::oneshot::channel();
+        gateway.classifier_assessment_pause=Some((entered,release));
+        let change=async {
+            enter.await.unwrap();
+            let mut session=manager.get("native-review").unwrap();
+            session.definition.meta.as_mut().unwrap().extra.insert("approval_memory".into(),
+                json!({"approve_for":"once","allowed_durations":["once"]}));
+            manager.restore(session);
+            resume.send(()).unwrap();
+        };
+        let (result,_) = tokio::join!(gateway.native_approval_grant(&id,"once",Some("/workspace"),Some("/workspace")),change);
+        assert_eq!(result["decision"],"deny","{result}");
+        assert_eq!(result["reason"],"Workflow changed during approval review");
+    }
+    #[test]
+    fn classifier_approval_event_has_compatible_safe_receipt_fields() {
+        let context=json!({"policy_sha256":"a".repeat(64),"grant_policy_v2_sha256":"b".repeat(64),
+            "invocation_sha256":"c".repeat(64),"dependency_sha256":"d".repeat(64),
+            "allowed_durations":["once","4h"],"approve_for":"4h","reusable":true});
+        let mut review=crate::classifier_grants::Review::new("owner".into(),"project".into(),
+            "run".into(),"session".into(),"work".into(),1,"generation".into(),0,
+            &context,"Bash",&json!({"command":"private_command_sentinel"}),true).unwrap();
+        review.invocation_fingerprint=Some("invocation_v1_fixture".into());
+        let grant=json!({"duration":"4h","expires_at":"2026-11-17T00:00:00+00:00","grant_id":"grant-hash"});
+        let event=Gateway::classifier_approval_event("granted",&review,Some(&grant));
+        assert_eq!(event["schema"],"statewright/classifier-approval-lifecycle/v1");
+        assert_eq!(event["type"],"classifier_human_approval_granted");
+        assert_eq!(event["provider"],"claude-code");assert_eq!(event["host"],"claude-code");
+        assert_eq!(event["approval_request_id"],review.id);
+        assert_eq!(event["review_request_id"],review.id);
+        assert_eq!(event["duration"],"4h");assert_eq!(event["default_duration"],"4h");
+        assert_eq!(event["grant_id"],"grant-hash");
+        assert_eq!(event["policy_sha256"],"a".repeat(64));
+        assert_eq!(event["grant_policy_v2_sha256"],"b".repeat(64));
+        assert_eq!(event["invocation_sha256"],"c".repeat(64));
+        assert_eq!(event["dependency_sha256"],"d".repeat(64));
+        assert!(!event.to_string().contains("private_command_sentinel"));
+    }
+    #[tokio::test]
+    async fn non_native_tool_call_cannot_mint_classifier_grant() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let mut gateway=native_classifier_review_gateway();
+        let input=json!({"command":"unknown_fixture --inspect","workdir":"/workspace"});
+        let deny=gateway.native_pre_tool("Bash",&input,&native_proofs(None)).await;
+        let id=deny["classifier_context"]["review_request_id"].as_str().unwrap().to_owned();
+        let direct=gateway.handle_message(JsonRpcRequest {jsonrpc:"2.0".into(),
+            method:"tools/call".into(),id:Some(json!(1)),
+            params:Some(json!({"name":"statewright_native_approval_grant",
+                "arguments":{"review_request_id":id,"duration":"once"}}))}).await.unwrap();
+        assert!(direct.error.is_some() || direct.result.as_ref().is_some_and(|result|result["isError"]==true));
+        let approved=gateway.native_approval_grant(&id,"once",Some("/workspace"),Some("/workspace")).await;
+        assert_eq!(approved["decision"],"allow","non-native call must not consume review id");
     }
 
     #[tokio::test]

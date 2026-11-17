@@ -112,7 +112,20 @@ function actionValid(action) {
     case 'transition': return only(i, ['event', 'data']) && validName(i.event) &&
       (i.data === undefined || object(i.data));
     case 'request_approval': return only(i, ['run_id', 'approval_id']) && validName(i.run_id) && validName(i.approval_id);
-    case 'pre_tool': return only(i, ['tool_name', 'tool_input']) && validName(i.tool_name) && object(i.tool_input);
+    case 'pre_tool': return only(i, ['tool_name', 'tool_input', 'project_root', 'approval_grant_tokens', 'one_use_receipt']) &&
+      validName(i.tool_name) && object(i.tool_input) &&
+      (i.project_root === undefined || typeof i.project_root === 'string' && i.project_root.length > 0 && i.project_root.length <= 4096) &&
+      (i.approval_grant_tokens === undefined || Array.isArray(i.approval_grant_tokens) &&
+        i.approval_grant_tokens.length <= 64 && i.approval_grant_tokens.every(token => typeof token === 'string' && token.length > 0 && token.length <= 2048)) &&
+      (i.one_use_receipt === undefined || typeof i.one_use_receipt === 'string' && /^[a-f0-9]{32}$/i.test(i.one_use_receipt));
+    case 'approval_grant': return only(i, ['review_request_id', 'duration', 'project_root', 'host_cwd']) &&
+      typeof i.review_request_id === 'string' && /^[a-f0-9]{32}$/i.test(i.review_request_id) &&
+      (i.project_root === undefined || typeof i.project_root === 'string' && i.project_root.length > 0 && i.project_root.length <= 4096) &&
+      (i.host_cwd === undefined || typeof i.host_cwd === 'string' && i.host_cwd.length > 0 && i.host_cwd.length <= 4096) &&
+      ['once', '2h', '4h', '8h', 'always'].includes(i.duration);
+    case 'approval_review': return only(i, ['review_request_id', 'action']) &&
+      typeof i.review_request_id === 'string' && /^[a-f0-9]{32}$/i.test(i.review_request_id) &&
+      ['denied', 'unavailable'].includes(i.action);
     case 'post_tool': return only(i, ['tool_name', 'tool_input', 'tool_response', 'is_error']) &&
       validName(i.tool_name) && object(i.tool_input) && typeof i.tool_response === 'string' && typeof i.is_error === 'boolean';
     default: return false;

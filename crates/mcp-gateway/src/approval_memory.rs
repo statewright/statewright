@@ -34,11 +34,10 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
         .meta
         .as_ref()
         .and_then(|meta| meta.extra.get("approval_memory"));
-    let durations = match configured {
+    let durations = match configured.and_then(|value|value.get("allowed_durations")) {
         None => DURATIONS.to_vec(),
         Some(value) => value
-            .get("allowed_durations")
-            .and_then(Value::as_array)
+            .as_array()
             .filter(|items| {
                 !items.is_empty()
                     && items
@@ -51,6 +50,7 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
                     .filter(|duration| *duration == "once" || items.iter().any(|v| v == duration))
                     .collect()
             })
+            // `approve_for` selects the host picker default, not its cap.
             .unwrap_or_else(|| vec!["once"]),
     };
     let approve_for = configured
@@ -202,6 +202,29 @@ mod tests {
             )["approve_for"],
             "8h"
         );
+    }
+    #[test]
+    fn approve_for_without_cap_offers_all_durations() {
+        let mut session = session();
+        session.definition = serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work",
+            "meta":{"approval_memory":{"approve_for":"4h"}},
+            "states":{"work":{}}
+        })).unwrap();
+        let policy = policy(&session);
+        assert_eq!(policy["approve_for"], "4h");
+        assert_eq!(policy["allowed_durations"], json!(["once","2h","4h","8h","always"]));
+    }
+    #[test]
+    fn explicit_invalid_cap_fails_closed() {
+        for cap in [json!([]),json!(["invalid"]),json!("4h")] {
+            let mut session=session();
+            session.definition=serde_json::from_value(json!({"id":"memory-fixture","initial":"work",
+                "meta":{"approval_memory":{"approve_for":"4h","allowed_durations":cap}},
+                "states":{"work":{}}})).unwrap();
+            assert_eq!(policy(&session)["allowed_durations"],json!(["once"]));
+            assert_eq!(policy(&session)["approve_for"],"once");
+        }
     }
 
     #[test]

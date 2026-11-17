@@ -159,6 +159,26 @@ Do not remove other servers or grant blanket tool permissions. Never run the old
   execute without another pre-check; post-call input comparison is detection,
   not prevention. Statewright does not replace Claude's own authorization.
 
+## Classifier reviews and timed approvals
+
+When Statewright cannot establish a command's effects, the native plugin may
+ask you to deny it, allow it once, or allow the exact invocation for 2, 4, or
+8 hours or until its binding changes. The workflow's
+`meta.approval_memory.approve_for` selects the initial choice;
+`allowed_durations` limits the timed choices. If dependency provenance is
+incomplete, or the gateway has no reusable-grant key and durable history,
+only **Deny** and **Allow once** are offered. Claude's own permission prompt
+may still follow. A timed choice skips only Statewright's classifier review
+while the policy and captured dependencies remain unchanged; Statewright may
+miss changes to executable contents it did not capture.
+
+Use `/statewright approvals revoke` or **Revoke approvals for this project** in
+the sidebar to remove saved grant tokens from the plugin store. If project
+scope is unavailable, the command removes all saved tokens. This local revoke
+does not invalidate a copied token at the gateway; the server-side revoke
+list is planned for Week 2 (B4). Timed grants require a gateway signing key
+and durable approval history; without them, only one-time approval is available.
+
 ## Development
 
 `node --test plugins/claude-code/tests/*.test.mjs` runs source tests from the

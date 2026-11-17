@@ -22,6 +22,7 @@ export const RUNTIME_FILES = [
   "hooks/catalog.mjs",
   "hooks/native-control.mjs",
   "hooks/native-execution.mjs",
+  "hooks/classifier-review.mjs",
   "hooks/native-routing.mjs",
   "hooks/workflow-ui.mjs",
   "hooks/result-ui.mjs",

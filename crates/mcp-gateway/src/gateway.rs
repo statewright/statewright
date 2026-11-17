@@ -371,19 +371,42 @@ impl Gateway {
         Ok(local)
     }
 
+    /// The clock that stamps reusable grant tokens and revocation cutoffs.
+    /// With durable history it is the database's `now()`, shared by every
+    /// replica, so replica clock skew cannot place a token minted before a
+    /// revoke after that revoke's cutoff. Without a database there is one
+    /// process and its own clock is authoritative.
+    async fn grant_clock_ms(&self) -> Result<i64,()> {
+        #[cfg(feature="metering")]
+        if let Some(pool)=&self.db_pool {
+            let row:Result<(i64,),_>=sqlx::query_as("SELECT floor(extract(epoch FROM now())*1000)::bigint")
+                .fetch_one(pool).await;
+            return row.map(|(value,)|value).map_err(|_|{
+                tracing::error!(event="classifier_grant_clock_unavailable","Grant clock could not be read");
+            });
+        }
+        Ok(crate::classifier_grants::current_ms())
+    }
+
     /// Revoke every timed and always grant this owner holds for the project
     /// scope, at the gateway. Copied tokens stop working on their next reuse.
     pub(crate) async fn native_approval_revoke(&mut self, project_root:Option<&str>) -> serde_json::Value {
         let project=self.approval_project_scope(project_root);
-        let at=crate::classifier_grants::current_ms();
+        #[allow(unused_mut)]
+        let mut at=crate::classifier_grants::current_ms();
         #[cfg(feature="metering")]
         if let Some(pool)=&self.db_pool {
-            let saved=sqlx::query("INSERT INTO statewright_events.classifier_grant_revocations(owner_id,project_id,revoked_before_ms) VALUES($1,$2,$3) ON CONFLICT(owner_id,project_id) DO UPDATE SET revoked_before_ms=GREATEST(statewright_events.classifier_grant_revocations.revoked_before_ms,EXCLUDED.revoked_before_ms),revoked_at=now()")
-                .bind(&self.owner_id).bind(&project).bind(at).execute(pool).await;
-            if saved.is_err() {
-                tracing::error!(event="classifier_grant_revocation_unavailable","Grant revocation was not persisted");
-                return json!({"classifier_approval":{"action":"revoke_failed",
-                    "reason":"Statewright could not record the revoke at the gateway. Try again."}});
+            // The cutoff is the database clock, the same clock grant_clock_ms
+            // stamps tokens with; the stored cutoff only ever moves forward.
+            let saved:Result<(i64,),_>=sqlx::query_as("INSERT INTO statewright_events.classifier_grant_revocations(owner_id,project_id,revoked_before_ms) VALUES($1,$2,floor(extract(epoch FROM now())*1000)::bigint) ON CONFLICT(owner_id,project_id) DO UPDATE SET revoked_before_ms=GREATEST(statewright_events.classifier_grant_revocations.revoked_before_ms,EXCLUDED.revoked_before_ms),revoked_at=now() RETURNING revoked_before_ms")
+                .bind(&self.owner_id).bind(&project).fetch_one(pool).await;
+            match saved {
+                Ok((cutoff,))=>at=cutoff,
+                Err(_)=>{
+                    tracing::error!(event="classifier_grant_revocation_unavailable","Grant revocation was not persisted");
+                    return json!({"classifier_approval":{"action":"revoke_failed",
+                        "reason":"Statewright could not record the revoke at the gateway. Try again."}});
+                }
             }
         }
         if !crate::classifier_grants::record_revocation(&self.owner_id,&project,at) {
@@ -913,7 +936,14 @@ impl Gateway {
             || matches!(interceptors::classifier_approval_policy_check(&session,&review.tool_name,&review.tool_input,&pipeline),PreCallDecision::Block(_)) {
             return json!({"decision":"deny","reason":"Independent workflow policy changed"});
         }
-        let receipt=match self.classifier_grants.grant(review.clone(),duration) {
+        // Reusable tokens are stamped on the same clock as revocation cutoffs.
+        let issued_at=if duration=="once" {crate::classifier_grants::current_ms()} else {
+            match self.grant_clock_ms().await {
+                Ok(value)=>value,
+                Err(())=>return json!({"decision":"deny","reason":"Statewright could not read its approval clock. Try again."}),
+            }
+        };
+        let receipt=match self.classifier_grants.grant_at(review.clone(),duration,issued_at) {
             Ok(value)=>value,Err(reason)=>return json!({"decision":"deny","reason":reason})
         };
         let approval=&receipt.payload["classifier_approval"];

@@ -15,6 +15,11 @@ const MAX_TOKENS: usize = 64;
 /// Revocation scopes are never evicted (eviction would revive revoked
 /// tokens). At capacity a new scope's revoke fails loudly instead.
 const MAX_REVOCATION_SCOPES: usize = 65_536;
+/// Reusable tokens and revocation cutoffs are stamped from one clock (the
+/// database's, when there is one), but each replica checks "issued in the
+/// future" against its own clock. Tolerate that much replica lag behind the
+/// stamping clock so a fresh grant is not rejected by a slightly slow replica.
+const ISSUED_AT_FUTURE_TOLERANCE_MS: i64 = 5_000;
 
 /// Process-local revocation cutoffs keyed by (owner, project scope). With
 /// durable history the gateway also persists each cutoff in Postgres and reads
@@ -343,10 +348,23 @@ impl ClassifierGrants {
     pub(crate) fn pending_receipt_count_for_test(&self) -> usize {
         self.once.len()
     }
+    #[cfg(test)]
     pub(crate) fn grant(
         &mut self,
         review: Review,
         duration: &str,
+    ) -> Result<GrantReceipt, &'static str> {
+        self.grant_at(review, duration, now_ms())
+    }
+    /// Grant `duration`, stamping a reusable token's `issued_at_ms` with
+    /// `issued_at_ms`. The gateway passes the authoritative (database) clock,
+    /// the same clock that stamps revocation cutoffs, so replica clock skew
+    /// cannot place a pre-revoke token after the cutoff.
+    pub(crate) fn grant_at(
+        &mut self,
+        review: Review,
+        duration: &str,
+        issued_at_ms: i64,
     ) -> Result<GrantReceipt, &'static str> {
         self.prune();
         if self.once.len() >= MAX_ONCE {
@@ -380,7 +398,6 @@ impl ClassifierGrants {
         let Some(key) = self.key.as_ref() else {
             return Err("Reusable approval key unavailable");
         };
-        let issued_at_ms = now_ms();
         let expires_at_ms = ttl(duration).map(|duration| issued_at_ms + duration);
         if duration != "always" && expires_at_ms.is_none() {
             return Err("Invalid approval duration");
@@ -481,7 +498,7 @@ impl ClassifierGrants {
                 || claims.owner != owner
                 || claims.project != project
                 || claims.binding != *binding
-                || claims.issued_at_ms > now_ms()
+                || claims.issued_at_ms > now_ms() + ISSUED_AT_FUTURE_TOLERANCE_MS
                 || revoked_before.is_some_and(|cutoff| claims.issued_at_ms <= cutoff)
                 || !matches!(claims.duration.as_str(), "2h" | "4h" | "8h" | "always")
                 || (claims.duration == "always" && !self.always_available())
@@ -756,6 +773,34 @@ mod tests {
         review.transport = Some(String::new());
         assert!(grants.issue(review).is_none());
     }
+    #[test]
+    fn revocation_compares_tokens_on_the_stamping_clock_not_the_replica_clock() {
+        // The issuing replica's clock runs 30 s ahead, but grants are stamped
+        // with the authoritative (database) clock, so a token minted before a
+        // revoke stays before its cutoff and dies with it.
+        let (mut grants, review) = fixture(true);
+        let db_now = now_ms();
+        let minted_before_revoke = grants.grant_at(review.clone(), "2h", db_now - 1_000).unwrap()
+            .payload["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        let cutoff = db_now;
+        assert!(grants
+            .reuse_unless_revoked(&[minted_before_revoke], "owner", "project", &review.binding, Some(cutoff))
+            .is_none(), "a pre-revoke token survived the revoke");
+        let minted_after = grants.grant_at(review.clone(), "2h", cutoff + 1).unwrap()
+            .payload["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        assert!(grants
+            .reuse_unless_revoked(&[minted_after], "owner", "project", &review.binding, Some(cutoff))
+            .is_some(), "a grant after the revoke must work");
+        // A replica slightly behind the stamping clock still accepts a fresh
+        // token; a token stamped far in the future is still refused.
+        let slightly_ahead = grants.grant_at(review.clone(), "2h", now_ms() + 2_000).unwrap()
+            .payload["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        assert!(grants.reuse(&[slightly_ahead], "owner", "project", &review.binding).is_some());
+        let far_future = grants.grant_at(review.clone(), "2h", now_ms() + 60_000).unwrap()
+            .payload["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        assert!(grants.reuse(&[far_future], "owner", "project", &review.binding).is_none());
+    }
+
     #[test]
     fn server_side_revocation_rejects_tokens_issued_before_the_cutoff() {
         for duration in ["2h", "always"] {

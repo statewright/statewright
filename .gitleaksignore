@@ -1,0 +1,5 @@
+# Fake curl-auth-header fixtures in bearer-redaction tests (not real credentials).
+# Scoped to these exact findings; any new finding still fails the scan.
+373b55b62e157798ae6cc34d72cc640e19b1e097:plugins/claude-code/tests/native-execution.test.mjs:curl-auth-header:72
+e5384fc019edf1cd6b5edccd748c9adaf7b6b211:plugins/executor/tests/adapter-bridge.test.mjs:curl-auth-header:268
+e5384fc019edf1cd6b5edccd748c9adaf7b6b211:plugins/executor/tests/classifier-approval-controller.test.mjs:curl-auth-header:75

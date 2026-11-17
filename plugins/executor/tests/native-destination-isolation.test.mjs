@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { codexNativeDestinationInvocation, nativeDestinationEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { CODEX_SHELL_CREDENTIAL_EXCLUDES, GENERIC_SHELL_CREDENTIAL_EXCLUDES } from "../lib/managed-credential-isolation.mjs";
 
 test("destination grammar does not reinterpret prompts or model/config values", () => {
   for (const argv of [["--remote", "ws://localhost:1", "resume", "one"], ["resume", "one", "--remote=ws://localhost:2"], ["app-server", "daemon", "start"], ["agents"], ["plugin", "list"], ["--help"]]) assert.equal(codexNativeDestinationInvocation("codex", argv), true, JSON.stringify(argv));
@@ -30,6 +31,19 @@ test("actual shim entry preserves two native destinations without provisioning a
       const code = await new Promise((r, reject) => { child.on("error", reject); child.on("close", r); }); clearTimeout(timer);
       assert.equal(code, 0, stderr);
     }
-    assert.deepEqual((await readFile(output, "utf8")).trim().split("\n").map(JSON.parse), calls.map(args => ({ args, key: false, bridge: false, thread: false })));
+    const recorded = (await readFile(output, "utf8")).trim().split("\n").map(JSON.parse);
+    // Managed Codex launches prepend a shell_environment_policy.exclude override so
+    // commands Codex runs never inherit Statewright credentials; the destination
+    // argv itself must pass through unchanged.
+    assert.equal(recorded.length, calls.length);
+    recorded.forEach((call, index) => {
+      assert.deepEqual({ key: call.key, bridge: call.bridge, thread: call.thread }, { key: false, bridge: false, thread: false });
+      assert.equal(call.args[0], "-c");
+      const prefix = "shell_environment_policy.exclude=";
+      assert.ok(call.args[1].startsWith(prefix), call.args[1]);
+      const excludes = JSON.parse(call.args[1].slice(prefix.length));
+      for (const pattern of [...GENERIC_SHELL_CREDENTIAL_EXCLUDES, ...CODEX_SHELL_CREDENTIAL_EXCLUDES]) assert.ok(excludes.includes(pattern), pattern);
+      assert.deepEqual(call.args.slice(2), calls[index]);
+    });
   } finally { await rm(root, { recursive: true, force: true }); }
 });

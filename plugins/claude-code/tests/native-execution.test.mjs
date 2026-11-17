@@ -50,9 +50,11 @@ test('queries and native denies do not create workflow observations', async () =
 });
 
 const reviewId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const invocation = 'c'.repeat(64);
 const reviewDeny = (memory = {}) => ({ decision: 'deny', reason: 'Classifier uncertainty',
   classifier_context: { review_request_id: reviewId, approval_memory: {
-    reusable: true, approve_for: 'once', allowed_durations: ['once', '2h', '4h', '8h', 'always'], ...memory,
+    reusable: true, approve_for: 'once', allowed_durations: ['once', '2h', '4h', '8h', 'always'],
+    invocation_sha256: invocation, ...memory,
   } }, risk_assessment: { final_denial_basis: 'incomplete_structural_evidence', semantic_status: 'Unavailable' } });
 
 test('native choices preselect workflow default and honor the duration cap', () => {
@@ -67,12 +69,40 @@ test('native choices preselect workflow default and honor the duration cap', () 
     ['Allow once', 'Allow for 2 hours', 'Allow for 4 hours', 'Allow for 8 hours', 'Always', 'Deny']);
 });
 
+test('Always is offered but never preselected, including absent and empty workflow defaults', () => {
+  const full = ['Allow once', 'Allow for 2 hours', 'Allow for 4 hours', 'Allow for 8 hours', 'Always', 'Deny'];
+  const alwaysDefault = classifierReviewChoices(reviewDeny({ approve_for: 'always' }).classifier_context);
+  assert.equal(alwaysDefault.defaultDuration, 'once');
+  assert.deepEqual(alwaysDefault.options, full);
+  assert.equal(classifierReviewDuration('Always', alwaysDefault), 'always');
+  const absentDefault = classifierReviewChoices({ approval_memory: {
+    reusable: true, allowed_durations: ['once', '2h', '4h', '8h', 'always'],
+  } });
+  assert.equal(absentDefault.defaultDuration, 'once');
+  assert.deepEqual(absentDefault.options, full);
+  const empty = classifierReviewChoices(reviewDeny({ approve_for: 'always', allowed_durations: [] }).classifier_context);
+  assert.equal(empty.defaultDuration, 'once');
+  assert.deepEqual(empty.options, ['Allow once', 'Deny']);
+  assert.deepEqual(classifierReviewChoices(reviewDeny({ allowed_durations: ['always'] }).classifier_context).options,
+    ['Allow once', 'Always', 'Deny']);
+});
+
+test('a gateway duration list without Always removes it from the native picker', () => {
+  const choices = classifierReviewChoices(reviewDeny({ approve_for: 'always',
+    allowed_durations: ['once', '2h', '4h', '8h'] }).classifier_context);
+  assert.equal(choices.defaultDuration, 'once');
+  assert.deepEqual(choices.options, ['Allow once', 'Allow for 2 hours', 'Allow for 4 hours', 'Allow for 8 hours', 'Deny']);
+  assert.equal(classifierReviewDuration('Always', choices), null);
+});
+
 test('review card masks credentials and explains Claude native permission', () => {
   const message = classifierReviewMessage(reviewDeny(), 'Bash', {
     command: 'curl -H "Authorization: Bearer PRIVATE123" --api-key secret https://example.test', cwd: '/fixture',
   }, '4h');
   assert.match(message, /Command: curl/);
   assert.match(message, /Authorization: \[redacted\]/);
+  assert.match(message, /Working directory: \/fixture/);
+  assert.match(message, /exact command and working directory/);
   assert.match(message, /Claude’s own permission prompt may still follow/);
   assert.match(message, /any dependencies Statewright captured remain unchanged/);
   assert.match(message, /may not detect changes to executable contents it did not capture/);
@@ -118,7 +148,7 @@ test('chosen four-hour grant is stored, reused, and never replaces Claude ask', 
   assert.equal(asks[0].options[0], 'Allow for 4 hours');
   assert.deepEqual(saved, [{ token, grant_id: 'grant-hash', expires_at: '2099-01-01T00:00:00Z' }]);
   assert.deepEqual(calls.map(call => call.operation), ['pre_tool', 'approval_grant', 'pre_tool', 'post_tool', 'pre_tool', 'post_tool']);
-  assert.deepEqual(calls[1].input, { review_request_id: reviewId, duration: '4h' });
+  assert.deepEqual(calls[1].input, { review_request_id: reviewId, duration: '4h', invocation_sha256: invocation });
   assert.equal(calls[2].input.one_use_receipt, receipt);
   assert.equal(calls[2].input.approval_grant_tokens, undefined);
   assert.deepEqual(calls[4].input.approval_grant_tokens, [token]);

@@ -119,6 +119,7 @@ export function createExecutionAdapter({ view, request, fault, after, approval, 
       const preTool = proof => request($, 'pre_tool', {
         tool_name: e.tool, tool_input: scope.toolInput,
         ...(upgraded && scope.projectRoot ? { project_root: scope.projectRoot } : {}),
+        ...(upgraded && scope.hostCwd ? { host_cwd: scope.hostCwd } : {}),
         ...(upgraded && (proof?.token || tokens.length) ? { approval_grant_tokens: proof?.token ? [proof.token] : tokens } : {}),
         ...(upgraded && proof?.one_use_receipt ? { one_use_receipt: proof.one_use_receipt } : {}),
       });
@@ -141,6 +142,7 @@ export function createExecutionAdapter({ view, request, fault, after, approval, 
             ? 'You denied this Statewright review.' : 'Statewright approval was unavailable or dismissed.' };
         }
         const granted = outcome(await request($, 'approval_grant', { review_request_id: context.review_request_id, duration,
+          invocation_sha256: context.approval_memory?.invocation_sha256,
           ...(scope.projectRoot ? { project_root: scope.projectRoot } : {}),
           ...(scope.hostCwd ? { host_cwd: scope.hostCwd } : {}) }));
         if (!await stillCurrent() || !await scopeCurrent()) return { decision: 'deny', reason: STALE };

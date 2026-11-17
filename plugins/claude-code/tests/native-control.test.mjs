@@ -98,6 +98,15 @@ test('unknown fields, approval decisions and alternate-session inputs never disp
   ]) await assert.rejects(h.controller.request({ ...action, expectedRevision: revision }));
   assert.equal(h.calls.length, 1);
 });
+test('approval grants require a bounded invocation digest from the reviewed request', async () => {
+  const h = host(); await h.controller.request({ operation: 'get_state', input: {} });
+  const base = { review_request_id: 'a'.repeat(32), duration: 'once' };
+  for (const input of [base, { ...base, invocation_sha256: 'short' },
+    { ...base, invocation_sha256: 'z'.repeat(64) }]) {
+    await assert.rejects(h.controller.request({ operation: 'approval_grant', input, expectedRevision: revision }));
+  }
+  assert.equal(h.calls.length, 1);
+});
 test('failed nested tool result is retained as a failure, with new state and revision', async () => {
   const h = host(); await h.controller.request({ operation: 'get_state', input: {} });
   h.result = receipt({ revision: newer, state: state(), outcome: { isError: true,

@@ -1,11 +1,29 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { AdapterBridge } from "../lib/adapter-bridge.mjs";
 
 const executorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+async function rawBridgeGet(url, headers) {
+  const endpoint = new URL(url);
+  return await new Promise((resolveResponse, rejectResponse) => {
+    const request = httpRequest({
+      hostname: endpoint.hostname,
+      port: endpoint.port,
+      path: endpoint.pathname,
+      headers,
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolveResponse(response.statusCode));
+    });
+    request.on("error", rejectResponse);
+    request.end();
+  });
+}
 
 async function invokeProxy(line, environment) {
   return await new Promise((resolveChild) => {
@@ -21,6 +39,38 @@ async function invokeProxy(line, environment) {
     child.stdin.end(`${JSON.stringify(line)}\n`);
   });
 }
+
+test("bridge rejects foreign Host and any Origin before checking the bearer", async () => {
+  const calls = [];
+  const bridge = await new AdapterBridge({
+    async call(name) {
+      calls.push(name);
+      return { state: "ready" };
+    },
+  }, { token: "test-token", host: "codex" }).start();
+
+  try {
+    const port = new URL(bridge.url).port;
+    for (const host of [`evil.example:${port}`, `localhost:${Number(port) + 1}`, `LOCALHOST:${port}`]) {
+      const status = await rawBridgeGet(`${bridge.url}/hooks/state`, { Host: host, Authorization: "Bearer test-token" });
+      assert.equal(status, 403, host);
+    }
+    for (const origin of ["https://evil.example", ""]) {
+      const status = await rawBridgeGet(`${bridge.url}/hooks/state`, { Origin: origin, Authorization: "Bearer test-token" });
+      assert.equal(status, 403, `Origin: ${origin}`);
+    }
+    assert.equal(await rawBridgeGet(`${bridge.url}/hooks/state`, {
+      Host: `evil.example:${port}`, Origin: "https://evil.example", Authorization: "Bearer wrong-token",
+    }), 403, "host and Origin checks precede bearer authentication");
+    assert.deepEqual(calls, []);
+    assert.equal(await rawBridgeGet(`${bridge.url}/hooks/state`, {
+      Host: `localhost:${port}`, Authorization: "Bearer test-token",
+    }), 200);
+    assert.deepEqual(calls, ["statewright_get_state"]);
+  } finally {
+    await bridge.close();
+  }
+});
 
 test("bridge authenticates adapters and preserves one executor identity", async () => {
   const calls = [];

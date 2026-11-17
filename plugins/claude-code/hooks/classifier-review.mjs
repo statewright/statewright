@@ -218,9 +218,11 @@ export function classifierReviewChoices(context) {
   const memory = context?.approval_memory;
   const permitted = Array.isArray(memory?.allowed_durations)
     ? DURATION_ORDER.filter(duration => memory.allowed_durations.includes(duration)) : ['once'];
-  const durations = memory?.reusable === true ? permitted : ['once'];
-  if (!durations.length) durations.push('once');
-  const defaultDuration = durations.includes(memory?.approve_for) ? memory.approve_for : 'once';
+  const durations = memory?.reusable === true ? ['once', ...permitted.filter(duration => duration !== 'once')] : ['once'];
+  // "Always" is available only as an explicit human choice, never the first
+  // choice shown by the host even if workflow metadata requests it.
+  const defaultDuration = memory?.approve_for !== 'always' && durations.includes(memory?.approve_for)
+    ? memory.approve_for : 'once';
   const ordered = [defaultDuration, ...durations.filter(duration => duration !== defaultDuration)];
   return { defaultDuration, durations, options: [...ordered.map(duration => DURATION_LABELS[duration]), 'Deny'] };
 }
@@ -241,8 +243,8 @@ export function classifierReviewMessage(decision, toolName, toolInput, defaultDu
   if (display?.cwd) lines.push(`Working directory: ${display.cwd}`);
   lines.push('', `Why review: ${REASONS[basis] ?? 'The request has an unresolved effect.'}`);
   lines.push(s1ClassificationDisplay(risk));
-  lines.push('A timed approval skips Statewright review only for this exact command while its policy and any dependencies Statewright captured remain unchanged. Claude’s own permission prompt may still follow.');
-  lines.push('Statewright may not detect changes to executable contents it did not capture. Always lasts until you revoke it or the bound command, captured dependencies, or policy change.');
+  lines.push('A timed approval skips Statewright review only for this exact command and working directory while its policy and any dependencies Statewright captured remain unchanged. Claude’s own permission prompt may still follow.');
+  lines.push('Statewright may not detect changes to executable contents it did not capture. Always lasts until you revoke it or the bound command, working directory, captured dependencies, or policy change.');
   lines.push(`Default choice: ${DURATION_LABELS[defaultDuration] ?? DURATION_LABELS.once}.`);
   return lines.join('\n');
 }

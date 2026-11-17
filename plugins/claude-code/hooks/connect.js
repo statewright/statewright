@@ -69,6 +69,9 @@ const validGrant = entry => entry && typeof entry.scope === 'string' && entry.sc
   entry.token.length <= 2048 && typeof entry.grant_id === 'string' && entry.grant_id.length <= 128 &&
   (entry.expires_at == null || typeof entry.expires_at === 'string' || Number.isFinite(entry.expires_at));
 const grantExpiry = value => typeof value === 'number' ? value : Date.parse(value);
+const liveApprovalGrants = saved => (Array.isArray(saved) ? saved : [])
+  .filter(entry => validGrant(entry) && (entry.expires_at == null || grantExpiry(entry.expires_at) > Date.now()))
+  .slice(-MAX_APPROVAL_GRANTS);
 async function approvalGrantScope($) {
   const v = await current($);
   let root;
@@ -79,15 +82,15 @@ async function approvalGrantScope($) {
 }
 async function approvalGrantEntries($) {
   const scope = await approvalGrantScope($), saved = await $.store.get(APPROVAL_GRANTS_KEY);
-  return Array.isArray(saved) ? saved.filter(entry => validGrant(entry) &&
-    entry.scope === scope && (entry.expires_at == null || grantExpiry(entry.expires_at) > Date.now())).slice(-MAX_APPROVAL_GRANTS) : [];
+  const live = liveApprovalGrants(saved);
+  if (Array.isArray(saved) && live.length !== saved.length) await $.store.set(APPROVAL_GRANTS_KEY, live);
+  return live.filter(entry => entry.scope === scope);
 }
 async function rememberApprovalGrant($, entry) {
   const scope = await approvalGrantScope($), scoped = { ...entry, scope };
   if (!validGrant(scoped)) throw new Error('Invalid Statewright approval receipt');
   const saved = await $.store.get(APPROVAL_GRANTS_KEY);
-  const entries = (Array.isArray(saved) ? saved : []).filter(item => validGrant(item) && item.grant_id !== entry.grant_id &&
-    (item.expires_at == null || grantExpiry(item.expires_at) > Date.now())).slice(-MAX_APPROVAL_GRANTS + 1);
+  const entries = liveApprovalGrants(saved).filter(item => item.grant_id !== entry.grant_id).slice(-MAX_APPROVAL_GRANTS + 1);
   entries.push({ scope, token: entry.token, grant_id: entry.grant_id, expires_at: entry.expires_at ?? null });
   await $.store.set(APPROVAL_GRANTS_KEY, entries.slice(-MAX_APPROVAL_GRANTS));
 }

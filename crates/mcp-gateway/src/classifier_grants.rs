@@ -10,6 +10,7 @@ use std::collections::HashMap;
 const REVIEW_TTL_MS: i64 = 10 * 60 * 1000;
 const ONCE_TTL_MS: i64 = 60 * 1000;
 const MAX_REVIEWS: usize = 128;
+const MAX_ONCE: usize = 128;
 const MAX_TOKENS: usize = 64;
 
 fn now_ms() -> i64 {
@@ -66,6 +67,9 @@ pub(crate) struct Binding {
     dependency_sha256: String,
 }
 impl Binding {
+    pub(crate) fn matches_invocation_hash(&self, hash: &str) -> bool {
+        self.invocation_sha256 == hash
+    }
     pub(crate) fn event_fields(&self) -> Value {
         json!({"policy_sha256":self.policy_sha256,"invocation_sha256":self.invocation_sha256,
             "dependency_sha256":self.dependency_sha256})
@@ -107,7 +111,7 @@ pub(crate) struct Review {
     pub(crate) default_duration: String,
     pub(crate) tool_name: String,
     pub(crate) tool_input: Value,
-    pub(crate) issued_at_ms: i64,
+    pub(crate) host_cwd: Option<String>,
     pub(crate) expires_at_ms: i64,
 }
 impl Review {
@@ -123,7 +127,9 @@ impl Review {
         context: &Value,
         tool_name: &str,
         tool_input: &Value,
+        host_cwd: Option<&str>,
         reusable_key: bool,
+        allow_always: bool,
     ) -> Option<Self> {
         let binding = Binding::from_context(context)?;
         let policy_sha256 = context["policy_sha256"]
@@ -138,14 +144,15 @@ impl Review {
         if reusable {
             for item in context["allowed_durations"].as_array()? {
                 let duration = item.as_str()?;
-                if matches!(duration, "2h" | "4h" | "8h" | "always") {
+                if matches!(duration, "2h" | "4h" | "8h" | "always")
+                    && (duration != "always" || (allow_always && crate::approval_memory::always_enabled())) {
                     allowed_durations.push(duration.to_owned());
                 }
             }
         }
         let default_duration = context["approve_for"]
             .as_str()
-            .filter(|value| allowed_durations.iter().any(|allowed| allowed == value))
+            .filter(|value| *value != "always" && allowed_durations.iter().any(|allowed| allowed == value))
             .unwrap_or("once")
             .to_owned();
         let issued_at_ms = now_ms();
@@ -167,7 +174,7 @@ impl Review {
             default_duration,
             tool_name: tool_name.into(),
             tool_input: tool_input.clone(),
-            issued_at_ms,
+            host_cwd: host_cwd.map(str::to_owned),
             expires_at_ms: issued_at_ms + REVIEW_TTL_MS,
         })
     }
@@ -207,10 +214,12 @@ pub(crate) struct NativeProofs {
     pub(crate) tokens: Vec<String>,
     pub(crate) one_use_receipt: Option<String>,
     pub(crate) project_root: Option<String>,
+    pub(crate) host_cwd: Option<String>,
 }
 
 pub(crate) struct ClassifierGrants {
     key: Option<GrantKey>,
+    always_enabled: bool,
     reviews: HashMap<String, Review>,
     once: HashMap<String, Review>,
 }
@@ -222,6 +231,7 @@ impl ClassifierGrants {
             } else {
                 None
             },
+            always_enabled: crate::approval_memory::always_enabled(),
             reviews: HashMap::new(),
             once: HashMap::new(),
         }
@@ -229,30 +239,37 @@ impl ClassifierGrants {
     pub(crate) fn has_key(&self) -> bool {
         self.key.is_some()
     }
+    pub(crate) fn always_available(&self) -> bool {
+        self.always_enabled && crate::approval_memory::always_enabled()
+    }
+    #[cfg(test)]
+    pub(crate) fn enable_key_for_test(&mut self) {
+        self.key = GrantKey::parse(&[b'k'; 32]);
+    }
+    #[cfg(test)]
+    pub(crate) fn disable_always_for_test(&mut self) {
+        self.always_enabled = false;
+    }
     fn prune(&mut self) {
         let now = now_ms();
         self.reviews.retain(|_, review| review.expires_at_ms > now);
         self.once.retain(|_, review| review.expires_at_ms > now);
     }
-    pub(crate) fn issue(&mut self, review: Review) -> String {
+    pub(crate) fn issue(&mut self, review: Review) -> Option<String> {
         self.prune();
         if self.reviews.len() >= MAX_REVIEWS {
-            if let Some(oldest) = self
-                .reviews
-                .values()
-                .min_by_key(|review| review.issued_at_ms)
-            {
-                let id = oldest.id.clone();
-                self.reviews.remove(&id);
-            }
+            // Expired entries have already been swept. Never discard a live,
+            // unconsumed human decision to admit another request.
+            return None;
         }
         let id = review.id.clone();
         self.reviews.insert(id.clone(), review);
-        id
+        Some(id)
     }
     /// Removal precedes validation, so a failed or concurrent mint cannot
     /// reuse the same human review decision.
     pub(crate) fn consume_review(&mut self, id: &str) -> Option<Review> {
+        self.prune();
         self.reviews
             .remove(id)
             .filter(|review| review.expires_at_ms > now_ms())
@@ -263,11 +280,34 @@ impl ClassifierGrants {
             review.binding.dependency_sha256 = "f".repeat(64);
         }
     }
+    #[cfg(test)]
+    pub(crate) fn change_invocation_for_test(&mut self, id: &str) {
+        if let Some(review) = self.reviews.get_mut(id) {
+            review.binding.invocation_sha256 = "f".repeat(64);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn expire_review_for_test(&mut self, id: &str) {
+        if let Some(review) = self.reviews.get_mut(id) {
+            review.expires_at_ms = now_ms() - 1;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn pending_receipt_count_for_test(&self) -> usize {
+        self.once.len()
+    }
     pub(crate) fn grant(
         &mut self,
         review: Review,
         duration: &str,
     ) -> Result<GrantReceipt, &'static str> {
+        self.prune();
+        if self.once.len() >= MAX_ONCE {
+            return Err("Immediate approval receipt capacity unavailable");
+        }
+        if duration == "always" && !self.always_available() {
+            return Err("Always approvals are disabled");
+        }
         if !review
             .allowed_durations
             .iter()
@@ -332,6 +372,7 @@ impl ClassifierGrants {
         epoch: u64,
         binding: &Binding,
     ) -> Option<Value> {
+        self.prune();
         let review = self.once.remove(receipt)?;
         if review.expires_at_ms <= now_ms()
             || review.owner != owner
@@ -346,12 +387,13 @@ impl ClassifierGrants {
         Some(json!({"action":"consumed","duration":"once","review_request_id":review.id}))
     }
     pub(crate) fn reuse(
-        &self,
+        &mut self,
         tokens: &[String],
         owner: &str,
         project: &str,
         binding: &Binding,
     ) -> Option<Value> {
+        self.prune();
         let key = self.key.as_ref()?;
         for token in tokens.iter().take(MAX_TOKENS) {
             if token.len() > 2048 {
@@ -381,6 +423,7 @@ impl ClassifierGrants {
                 || claims.binding != *binding
                 || claims.issued_at_ms > now_ms()
                 || !matches!(claims.duration.as_str(), "2h" | "4h" | "8h" | "always")
+                || (claims.duration == "always" && !self.always_available())
                 || claims
                     .expires_at_ms
                     .is_some_and(|expiry| expiry <= now_ms())
@@ -420,7 +463,9 @@ mod tests {
             &context,
             "Bash",
             &json!({"command":"x"}),
+            Some("/workspace"),
             key,
+            true,
         )
         .unwrap();
         (grants, review)
@@ -428,12 +473,12 @@ mod tests {
     #[test]
     fn review_is_one_time_and_expiring() {
         let (mut grants, review) = fixture(true);
-        let id = grants.issue(review.clone());
+        let id = grants.issue(review.clone()).unwrap();
         assert!(grants.consume_review(&id).is_some());
         assert!(grants.consume_review(&id).is_none());
         let mut expired = review;
         expired.expires_at_ms = now_ms() - 1;
-        let id = grants.issue(expired);
+        let id = grants.issue(expired).unwrap();
         assert!(grants.consume_review(&id).is_none());
     }
     #[test]
@@ -543,6 +588,8 @@ mod tests {
             &context,
             "Bash",
             &json!({"command":"x"}),
+            Some("/workspace"),
+            true,
             true,
         )
         .unwrap();
@@ -550,5 +597,91 @@ mod tests {
         assert_eq!(review.default_duration, "once");
         assert!(grants.grant(review.clone(), "4h").is_err());
         assert!(grants.grant(review, "once").is_ok());
+    }
+    #[test]
+    fn forged_always_claims_and_other_invocations_are_rejected() {
+        let (mut grants, review) = fixture(true);
+        let token = grants.grant(review.clone(), "always").unwrap().payload
+            ["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        let body = URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap();
+        let wrong_key = GrantKey::parse(&[b'w'; 32]).unwrap();
+        let wrong_signature = format!("v1.{}.{}",URL_SAFE_NO_PAD.encode(&body),
+            URL_SAFE_NO_PAD.encode(wrong_key.sign(&body)));
+        assert!(grants.reuse(&[wrong_signature],"owner","project",&review.binding).is_none());
+
+        let timed = grants.grant(review.clone(), "2h").unwrap().payload
+            ["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        let mut claims: Claims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(
+            timed.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        claims.duration = "always".into();
+        claims.expires_at_ms = None;
+        let edited = format!("v1.{}.{}",URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()),
+            timed.split('.').nth(2).unwrap());
+        assert!(grants.reuse(&[edited],"owner","project",&review.binding).is_none());
+
+        let mut other_command = review.binding.clone();
+        other_command.invocation_sha256 = "d".repeat(64);
+        assert!(grants.reuse(&[token.clone()],"owner","project",&other_command).is_none());
+        let mut other_cwd = review.binding.clone();
+        other_cwd.invocation_sha256 = "e".repeat(64);
+        assert!(grants.reuse(&[token],"owner","project",&other_cwd).is_none());
+    }
+    #[test]
+    fn always_switch_rejects_mint_and_existing_token_reuse() {
+        let (mut grants, review) = fixture(true);
+        let token = grants.grant(review.clone(),"always").unwrap().payload
+            ["classifier_approval"]["token"].as_str().unwrap().to_owned();
+        grants.always_enabled = false;
+        assert!(grants.grant(review.clone(),"always").is_err());
+        assert!(grants.reuse(&[token],"owner","project",&review.binding).is_none());
+        assert!(grants.grant(review,"2h").is_ok());
+    }
+    #[test]
+    fn review_and_immediate_receipt_capacity_never_evict_live_ids() {
+        let (mut grants, mut review) = fixture(true);
+        let mut ids = Vec::new();
+        for _ in 0..MAX_REVIEWS {
+            review.id = new_id();
+            ids.push(grants.issue(review.clone()).unwrap());
+        }
+        review.id = new_id();
+        assert!(grants.issue(review.clone()).is_none());
+        assert!(grants.consume_review(&ids[0]).is_some());
+        assert!(grants.issue(review.clone()).is_some());
+        assert!(grants.consume_review(&ids[1]).is_some());
+        let expired = grants.reviews.get_mut(&ids[2]).unwrap();
+        expired.expires_at_ms = now_ms() - 1;
+        review.id = new_id();
+        assert!(grants.issue(review.clone()).is_some());
+        assert!(grants.consume_review(&ids[2]).is_none());
+
+        let mut receipts = Vec::new();
+        for _ in 0..MAX_ONCE {
+            receipts.push(grants.grant(review.clone(),"once").unwrap().payload
+                ["classifier_approval"]["one_use_receipt"].as_str().unwrap().to_owned());
+        }
+        assert!(grants.grant(review.clone(),"once").is_err());
+        assert!(grants.use_once(&receipts[0],"owner","project","run","session",1,&review.binding).is_some());
+        assert!(grants.grant(review.clone(),"once").is_ok());
+        grants.once.get_mut(&receipts[1]).unwrap().expires_at_ms = now_ms() - 1;
+        assert!(grants.grant(review,"once").is_ok());
+        assert!(grants.use_once(&receipts[1],"owner","project","run","session",1,
+            &fixture(true).1.binding).is_none());
+    }
+    #[test]
+    fn review_default_never_always_even_with_forged_context() {
+        let (_, mut review) = fixture(true);
+        review.default_duration = "always".into();
+        let mut context = json!({"grant_policy_v2_sha256":"a".repeat(64),
+            "invocation_sha256":"b".repeat(64),"dependency_sha256":"c".repeat(64),
+            "allowed_durations":["once","2h","always"],"approve_for":"always","reusable":true});
+        for preferred in [Some("always"), None] {
+            if let Some(preferred)=preferred { context["approve_for"]=json!(preferred); }
+            else { context.as_object_mut().unwrap().remove("approve_for"); }
+            let offered=Review::new("owner".into(),"project".into(),"run".into(),"session".into(),
+                "state".into(),1,"generation".into(),0,&context,"Bash",
+                &json!({"command":"x","workdir":"/workspace"}),Some("/workspace"),true,true).unwrap();
+            assert_eq!(offered.default_duration,"once");
+        }
     }
 }

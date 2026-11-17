@@ -164,12 +164,18 @@ Do not remove other servers or grant blanket tool permissions. Never run the old
 When Statewright cannot establish a command's effects, the native plugin may
 ask you to deny it, allow it once, or allow the exact invocation for 2, 4, or
 8 hours or until its binding changes. The workflow's
-`meta.approval_memory.approve_for` selects the initial choice;
-`allowed_durations` limits the timed choices. If dependency provenance is
+`meta.approval_memory.approve_for` selects the initial choice, except that
+**Always** is never preselected; a missing default, `approve_for: always`, or
+an empty duration list starts at **Allow once**. **Always** remains an explicit
+human choice. The gateway's single `STATEWRIGHT_APPROVAL_ALWAYS` switch is
+`on` by default; set it to `off` to remove **Always** from the picker and
+reject both new and existing Always grants. `allowed_durations` limits the
+timed choices. If dependency provenance is
 incomplete, or the gateway has no reusable-grant key and durable history,
 only **Deny** and **Allow once** are offered. Claude's own permission prompt
 may still follow. A timed choice skips only Statewright's classifier review
-while the policy and captured dependencies remain unchanged; Statewright may
+for the exact command and session working directory while the policy and
+captured dependencies remain unchanged; Statewright may
 miss changes to executable contents it did not capture.
 
 Use `/statewright approvals revoke` or **Revoke approvals for this project** in

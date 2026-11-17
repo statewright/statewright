@@ -46,6 +46,30 @@ statewright_allowed_capability() {
   printf '%s\n' "$2" | grep -Fqx "$(statewright_capability_for_tool "$1")"
 }
 
+# Only the Statewright server's exact MCP tools bypass workflow tool gating.
+# Claude has used both plugin prefix spellings as well as the direct server.
+statewright_mcp_tool_name() {
+  local name="$1"
+  case "$name" in
+    mcp__statewright__*) name="${name#mcp__statewright__}" ;;
+    mcp__plugin_statewright_statewright__*) name="${name#mcp__plugin_statewright_statewright__}" ;;
+    mcp__plugin_statewright_*) name="${name#mcp__plugin_statewright_}" ;;
+    statewright_*) ;;
+    *) return 1 ;;
+  esac
+  case "$name" in
+    statewright_start|statewright_stop|statewright_connect|statewright_transition|\
+    statewright_set_classifier_audit|statewright_get_state|statewright_get_usage|\
+    statewright_report_runtime_usage|statewright_list_workflows|statewright_search_docs|\
+    statewright_get_workflow|statewright_load_workflow|statewright_deactivate|\
+    statewright_pause|statewright_get_status|statewright_create_workflow|\
+    statewright_force_state|statewright_run_agent|statewright_get_model_traits|\
+    statewright_native_connect|statewright_native_request|statewright_adapter_pre_tool|\
+    statewright_adapter_post_tool|statewright_adapter_stop) printf '%s' "$name" ;;
+    *) return 1 ;;
+  esac
+}
+
 statewright_uses_unsupported_shell() {
   local tool_name="$1" hook_input="$2" shell
   case "$tool_name" in
@@ -102,10 +126,19 @@ if [ "$NEEDS_BOOTSTRAP" = true ]; then
 fi
 
 # --- Helper: call MCP gateway ---
+curl_bearer_config() {
+  local token="$1"
+  case "$token" in *$'\r'*|*$'\n'*) return 1 ;; esac
+  token="${token//\\/\\\\}"
+  token="${token//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$token"
+}
+
 mcp_call() {
-  curl -sf --max-time 5 -X POST "$GW_URL/" \
+  local auth_config
+  auth_config=$(curl_bearer_config "$API_KEY") || return 0
+  printf '%s\n' "$auth_config" | curl -K - -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
     "${SESSION_HEADER_ARGS[@]}" \
     -d "$1" 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
@@ -138,11 +171,16 @@ adapter_call() {
   local endpoint="$1" method="${2:-GET}" body="${3:-}"
   [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] || return 1
   local args=(-sf --max-time 5 -X "$method" "${STATEWRIGHT_ADAPTER_URL%/}/hooks/${endpoint}")
-  [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ] && args+=(-H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN}")
   if [ -n "$body" ]; then
     args+=(-H 'Content-Type: application/json' --data-binary "$body")
   fi
-  curl "${args[@]}" 2>/dev/null
+  if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then
+    local auth_config
+    auth_config=$(curl_bearer_config "$STATEWRIGHT_ADAPTER_TOKEN") || return 1
+    printf '%s\n' "$auth_config" | curl -K - "${args[@]}" 2>/dev/null
+  else
+    curl "${args[@]}" 2>/dev/null
+  fi
 }
 
 # Project only provider-exact assistant usage metadata from Claude's local
@@ -487,8 +525,9 @@ case "$ENDPOINT" in
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
     if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+      if statewright_mcp_tool_name "$TOOL_NAME" >/dev/null; then exit 0; fi
       case "$TOOL_NAME" in
-        *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+        TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
       esac
       TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
       REQUEST=$(jq -cn --arg name "$TOOL_NAME" --argjson input "$TOOL_INPUT" \
@@ -520,8 +559,9 @@ case "$ENDPOINT" in
     fi
 
     # Always allow system/internal/MCP tools
+    if statewright_mcp_tool_name "$TOOL_NAME" >/dev/null; then exit 0; fi
     case "$TOOL_NAME" in
-      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+      TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
     esac
 
     # Read cached state (written by UserPromptSubmit — ZERO network calls)
@@ -665,17 +705,14 @@ case "$ENDPOINT" in
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
     TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // .tool_response // empty' 2>/dev/null || true)
 
-    # Match tool name regardless of prefix format (mcp__, plugin:, etc.)
+    # Match only known Statewright control tools on known server prefixes.
     SW_ACTION=""
-    case "$TOOL_NAME" in
-      *statewright_start*) SW_ACTION="start" ;;
-      *statewright_load_workflow*) SW_ACTION="start" ;;
-      *statewright_stop*) SW_ACTION="stop" ;;
-      *statewright_deactivate*) SW_ACTION="stop" ;;
-      *statewright_pause*) SW_ACTION="stop" ;;
-      *statewright_transition*) SW_ACTION="transition" ;;
-      *statewright_force_state*) SW_ACTION="transition" ;;
-      *statewright_get_state*) SW_ACTION="refresh_cache" ;;
+    SW_TOOL=$(statewright_mcp_tool_name "$TOOL_NAME" || true)
+    case "$SW_TOOL" in
+      statewright_start|statewright_load_workflow) SW_ACTION="start" ;;
+      statewright_stop|statewright_deactivate|statewright_pause) SW_ACTION="stop" ;;
+      statewright_transition|statewright_force_state) SW_ACTION="transition" ;;
+      statewright_get_state) SW_ACTION="refresh_cache" ;;
     esac
 
     # capture.sh is deliberately opt-in and skips Statewright control tools.

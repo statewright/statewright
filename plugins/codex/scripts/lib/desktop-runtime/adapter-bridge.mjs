@@ -87,6 +87,17 @@ function authorized(request, token) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+function localBridgeRequest(request, port) {
+  const hosts = [];
+  for (let i = 0; i < request.rawHeaders.length; i += 2) {
+    const name = request.rawHeaders[i].toLowerCase();
+    if (name === "origin") return false;
+    if (name === "host") hosts.push(request.rawHeaders[i + 1]);
+  }
+  return hosts.length === 1
+    && (hosts[0] === `127.0.0.1:${port}` || hosts[0] === `localhost:${port}`);
+}
+
 export class AdapterBridge {
   constructor(client, options = {}) {
     this.client = client;
@@ -141,6 +152,10 @@ export class AdapterBridge {
       this.activeRequests += 1;
       this.lastRequestAt = Date.now();
       try {
+        if (!localBridgeRequest(request, this.server.address().port)) {
+          json(response, 403, { error: "forbidden origin or host" });
+          return;
+        }
         if (!authorized(request, this.token)) {
           json(response, 401, { error: "unauthorized" });
           return;

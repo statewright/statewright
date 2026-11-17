@@ -88,10 +88,12 @@ struct PreTool {
     one_use_receipt: Option<String>,
     #[serde(default)]
     project_root: Option<String>,
+    #[serde(default)]
+    host_cwd: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApprovalGrant { review_request_id:String, duration:String, project_root:Option<String>, host_cwd:Option<String> }
+struct ApprovalGrant { review_request_id:String, invocation_sha256:String, duration:String, project_root:Option<String>, host_cwd:Option<String> }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApprovalReview { review_request_id:String, action:String }
@@ -163,6 +165,7 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
                 || input.approval_grant_tokens.iter().any(|token|token.len()>2048)
                 || input.one_use_receipt.as_ref().is_some_and(|receipt|receipt.len()!=32 || !receipt.bytes().all(|byte|byte.is_ascii_hexdigit()))
                 || input.project_root.as_deref().is_some_and(|root|!valid_project_root(root))
+                || input.host_cwd.as_deref().is_some_and(|cwd|!valid_project_root(cwd))
                 || serde_json::to_string(&input.tool_input)
                     .unwrap_or_default()
                     .len()
@@ -176,6 +179,7 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
             let input:ApprovalGrant=serde_json::from_value(request.input.clone())
                 .map_err(|_|"Invalid classifier approval grant input")?;
             if input.review_request_id.len()!=32 || !input.review_request_id.bytes().all(|byte|byte.is_ascii_hexdigit())
+                || input.invocation_sha256.len()!=64 || !input.invocation_sha256.bytes().all(|byte|byte.is_ascii_hexdigit())
                 || !matches!(input.duration.as_str(),"once"|"2h"|"4h"|"8h"|"always")
                 || input.project_root.as_deref().is_some_and(|root|!valid_project_root(root))
                 || input.host_cwd.as_deref().is_some_and(|cwd|!valid_project_root(cwd)) {
@@ -466,13 +470,14 @@ pub(super) async fn handle(
                     tokens:input.approval_grant_tokens,
                     one_use_receipt:input.one_use_receipt,
                     project_root:input.project_root,
+                    host_cwd:input.host_cwd,
                 };
                 let decision=session.gateway.native_pre_tool(&input.tool_name,&Value::Object(input.tool_input),&proofs).await;
                 serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
             }
             "statewright_native_approval_grant" => {
                 let input:ApprovalGrant=serde_json::from_value(native.input).expect("validated native grant");
-                let decision=session.gateway.native_approval_grant(&input.review_request_id,&input.duration,
+                let decision=session.gateway.native_approval_grant(&input.review_request_id,&input.invocation_sha256,&input.duration,
                     input.project_root.as_deref(),input.host_cwd.as_deref()).await;
                 serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
             }
@@ -561,11 +566,15 @@ mod classifier_native_tests {
     #[test]
     fn review_operations_are_native_only_and_validate_bounds() {
         assert_eq!(parse(request("approval_grant",json!({"review_request_id":"a".repeat(32),
-            "duration":"4h","project_root":"C:\\workspace"}))).unwrap().1,"statewright_native_approval_grant");
+            "invocation_sha256":"b".repeat(64),"duration":"4h","project_root":"C:\\workspace"}))).unwrap().1,"statewright_native_approval_grant");
         assert_eq!(parse(request("approval_review",json!({"review_request_id":"a".repeat(32),
             "action":"denied"}))).unwrap().1,"statewright_native_approval_review");
         assert!(parse(request("approval_grant",json!({"review_request_id":"a".repeat(32),
-            "duration":"1d"}))).is_err());
+            "invocation_sha256":"b".repeat(64),"duration":"1d"}))).is_err());
+        assert!(parse(request("approval_grant",json!({"review_request_id":"a".repeat(32),
+            "duration":"4h"}))).is_err());
+        assert!(parse(request("pre_tool",json!({"tool_name":"Bash","tool_input":{},
+            "host_cwd":"relative/path"}))).is_err());
         assert!(parse(request("pre_tool",json!({"tool_name":"Bash","tool_input":{},
             "approval_grant_tokens":vec!["x";65]}))).is_err());
         assert!(valid_project_root("\\\\host\\share"));

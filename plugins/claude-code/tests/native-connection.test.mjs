@@ -922,11 +922,13 @@ test('all mod boundaries reject foreign native context and mutations; own reads 
     assert.ok((await h.fire('mcp.call', { server: SERVER, tool: 'statewright_native_request', args: input }, () => assert.fail())).deny);
   }
 });
-test('model-originated approval_grant is denied before Claude native permission can answer', async () => {
+for (const operation of ['approval_grant', 'approval_review']) test(`model-originated ${operation} is denied by tool.check`, async () => {
   const h = await host();
   const tool = `mcp__plugin_statewright_${SERVER}__statewright_native_request`;
-  const input = { context: { version: 1, conversation_id: CHAT }, operation: 'approval_grant',
-    input: { review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', duration: '4h' }, expected_revision: crypto.randomUUID() };
+  const input = { context: { version: 1, conversation_id: CHAT }, operation,
+    input: { review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      ...(operation === 'approval_grant' ? { duration: '4h', invocation_sha256: 'c'.repeat(64) } : { action: 'denied' }) },
+    expected_revision: crypto.randomUUID() };
   const verdict = await h.fire('tool.check', { tool, tool_use_id: 'model-grant', input },
     () => assert.fail('model grant must stop before native policy'));
   assert.equal(verdict.decision, 'deny');
@@ -1003,6 +1005,7 @@ test('Bash sends host-observed cwd and project root to the gateway while preserv
   assert.ok(result.deny);
   const pre = h.state.calls.find(call => call.args.operation === 'pre_tool');
   assert.equal(pre.args.input.project_root, '/host/project');
+  assert.equal(pre.args.input.host_cwd, '/host/current');
   assert.deepEqual(pre.args.input.tool_input, { command: 'echo hello', workdir: '/host/current' });
   assert.deepEqual(input, { command: 'echo hello' });
 });
@@ -1064,6 +1067,7 @@ test('native four-hour choice persists a scoped token in $.store and reuses it',
     if (operation === 'approval_grant') {
       assert.equal(input.project_root, '/host/project');
       assert.equal(input.host_cwd, '/host/current');
+      assert.equal(input.invocation_sha256, 'c'.repeat(64));
     }
     const outcome = operation === 'approval_grant'
       ? { decision: 'allow', classifier_approval: { action: 'granted', duration: '4h', grant_id: 'grant-hash',
@@ -1073,6 +1077,7 @@ test('native four-hour choice persists a scoped token in $.store and reuses it',
         : { decision: 'deny', reason: 'Classifier uncertainty', classifier_context: {
           review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', approval_memory: {
             reusable: true, approve_for: '4h', allowed_durations: ['once', '2h', '4h', '8h', 'always'],
+            invocation_sha256: 'c'.repeat(64),
           } }, risk_assessment: { final_denial_basis: 'incomplete_structural_evidence' } };
     h.snapshot.revision = crypto.randomUUID();
     return wire({ ...h.snapshot, outcome: wire(outcome) });
@@ -1089,9 +1094,64 @@ test('native four-hour choice persists a scoped token in $.store and reuses it',
   }
   assert.equal(h.state.asks.length, 1);
   assert.deepEqual(h.state.asks[0][1].options[0], 'Allow for 4 hours');
+  assert.ok(h.state.calls.filter(call => call.args.operation === 'pre_tool')
+    .every(call => call.args.input.host_cwd === '/host/current'));
   assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), [{ scope: `owner:${owner}:project:/host/project`,
     token, grant_id: 'grant-hash', expires_at: '2099-01-01T00:00:00Z' }]);
   assert.equal(h.state.calls.filter(call => call.args.operation === 'approval_grant').length, 1);
+});
+
+test('loading and saving grants prune expired tokens and keep at most 64', async () => {
+  const h = await workflowHost(), owner = 'a'.repeat(64), token = 'new-signed-token';
+  h.$.session.cwd = async () => '/host/current';
+  h.$.session.root = async () => '/host/project';
+  h.snapshot.owner_fingerprint = owner;
+  h.state.answer = 'Allow for 4 hours';
+  await h.press('start');
+  const scope = `owner:${owner}:project:/host/project`;
+  const old = Array.from({ length: 70 }, (_, i) => ({ scope, token: `prior-${i}`, grant_id: `grant-${i}`,
+    expires_at: '2099-01-01T00:00:00Z' }));
+  h.stored.set('classifier-approval-grants:v1', [
+    { scope, token: 'expired', grant_id: 'expired', expires_at: '2000-01-01T00:00:00Z' }, ...old,
+  ]);
+  const read = h.state.read;
+  const wire = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
+  h.state.read = async call => {
+    const { operation, input } = call.args;
+    if (operation !== 'pre_tool' && operation !== 'approval_grant') return read(call);
+    if (operation === 'approval_grant') assert.equal(input.invocation_sha256, 'c'.repeat(64));
+    if (operation === 'pre_tool' && !input.one_use_receipt) {
+      const loaded = h.stored.get('classifier-approval-grants:v1');
+      assert.equal(loaded.length, 64, 'loading prunes the persisted list');
+      assert.equal(loaded.some(entry => entry.token === 'expired'), false);
+    }
+    const result = operation === 'approval_grant'
+      ? { decision: 'allow', classifier_approval: { action: 'granted', duration: '4h', grant_id: 'new-grant',
+        expires_at: '2099-01-01T00:00:00Z', token, one_use_receipt: 'b'.repeat(32) } }
+      : input.one_use_receipt === 'b'.repeat(32) ? { decision: 'allow' }
+        : { decision: 'deny', reason: 'Classifier uncertainty', classifier_context: {
+          review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', approval_memory: {
+            reusable: true, approve_for: '4h', allowed_durations: ['once', '2h', '4h', '8h', 'always'],
+            invocation_sha256: 'c'.repeat(64),
+          } }, risk_assessment: { final_denial_basis: 'incomplete_structural_evidence' } };
+    h.snapshot.revision = crypto.randomUUID();
+    return wire({ ...h.snapshot, outcome: wire(result) });
+  };
+  const input = { command: 'echo hello' };
+  await h.fire('tool.call', { tool: 'Bash', tool_use_id: 'bounded-grants', ...input }, async () => {
+    assert.equal((await h.fire('tool.check', { tool: 'Bash', tool_use_id: 'bounded-grants', input },
+      async () => ({ decision: 'ask' }))).decision, 'ask');
+    await h.fire('classic.PostToolUse', { tool_name: 'Bash', tool_use_id: 'bounded-grants',
+      tool_input: input, tool_response: 'ok' });
+    return { result: 'ok' };
+  });
+  const pre = h.state.calls.find(call => call.args.operation === 'pre_tool');
+  assert.deepEqual(pre.args.input.approval_grant_tokens, old.slice(-64).map(entry => entry.token));
+  const saved = h.stored.get('classifier-approval-grants:v1');
+  assert.equal(saved.length, 64);
+  assert.equal(saved.some(entry => entry.token === 'expired'), false);
+  assert.equal(saved.at(-1).token, token);
+  assert.equal(saved[0].token, old[7].token);
 });
 
 test('disconnected revocation clears all stored tokens and says so', async () => {

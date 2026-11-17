@@ -5,13 +5,41 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const PLUGINS = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const FAKE_KEY = "FAKE-launch-policy-key";
+// Fake credentials, random per run so no window of one can collide with an
+// ordinary argument. Every credential a managed launch can hold is seeded.
+const fake = label => `FAKE${label}${randomBytes(18).toString("hex")}`;
+const SECRETS = { STATEWRIGHT_API_KEY: fake("key"), STATEWRIGHT_MANAGED_MCP_TOKEN: fake("managed"),
+  STATEWRIGHT_REFRESH_TOKEN: fake("refresh"), GH_TOKEN: fake("gh") };
+
+// Windows of each value and of its base64/base64url/hex encodings, so an
+// encoded or split credential on argv is still found.
+function leakWindows(value) {
+  const windows = [];
+  const slide = (text, size) => { for (let i = 0; i + size <= text.length; i++) windows.push(text.slice(i, i + size)); };
+  slide(value, 8);
+  for (let offset = 0; offset < 3; offset++) {
+    const tail = Buffer.from(value.slice(offset));
+    slide(tail.toString("base64").replace(/=+$/, "").slice(0, -2), 12);
+    slide(tail.toString("base64url").slice(0, -2), 12);
+  }
+  slide(Buffer.from(value).toString("hex"), 16);
+  return windows;
+}
+
+function assertNoCredential(argv, label) {
+  const joined = [argv.join(""), argv.join(" "), argv.join("\n")].join("\u0000");
+  for (const [name, value] of Object.entries(SECRETS)) {
+    const leaked = leakWindows(value).find(window => joined.includes(window) || joined.toLowerCase().includes(window.toLowerCase()) && /^[0-9a-f]+$/.test(window));
+    assert.equal(leaked, undefined, `${label}: ${name} (or an encoding or piece of it) must not reach argv`);
+  }
+}
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "sw-codex-policy-args-"));
@@ -28,7 +56,7 @@ process.exit(0);
     const child = spawn(process.execPath, args, {
       cwd: root,
       env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR ?? "/tmp", CODEX_HOME: join(home, ".codex"),
-        STATEWRIGHT_API_KEY: FAKE_KEY, STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:9", STATEWRIGHT_SENTRY_DISABLED: "1" },
+        ...SECRETS, STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:9", STATEWRIGHT_SENTRY_DISABLED: "1" },
       stdio: ["ignore", "ignore", "ignore"],
     });
     const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
@@ -46,7 +74,7 @@ function assertPolicyArgs(argv, label) {
   for (const pattern of ["STATEWRIGHT_*API_KEY*", "STATEWRIGHT_*_TOKEN", "*_TOKEN", "*_KEY"]) {
     assert.ok(policy.includes(JSON.stringify(pattern)), `${label}: policy must exclude ${pattern}`);
   }
-  assert.ok(!argv.some(arg => arg.includes(FAKE_KEY)), `${label}: no credential value on argv`);
+  assertNoCredential(argv, label);
 }
 
 // The Claude Code bundle's copy (claude-code/executor) only launches Claude and

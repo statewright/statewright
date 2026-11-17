@@ -280,7 +280,7 @@ statewright_scan_bound() {
 # subshell with a scrubbed environment: only the inherited variables in `keep`
 # survive (STATEWRIGHT_API_KEY, STATEWRIGHT_MANAGED_MCP_TOKEN, *_FILE paths,
 # GH_TOKEN and the rest are unset) and the entry's own env is exported (never
-# STATEWRIGHT_* names), so env values stay out of argv; argv comes from a
+# STATEWRIGHT_* names in any case), so env values stay out of argv; argv comes from a
 # NUL-delimited jq read, never word-split. The server is bounded by
 # statewright_scan_bound (15s, then KILL).
 # $1 = server entry JSON, $2 = plugin root for ${CLAUDE_PLUGIN_ROOT}.
@@ -300,7 +300,7 @@ statewright_scan_stdio_server() {
     done < <(printf '%s' "$entry" | jq -j '(.args // []) | if type == "array" then .[] | strings | (. + "\u0000") else empty end' 2>/dev/null)
     while IFS= read -r -d '' pair; do
       name="${pair%%=*}"
-      case "$name" in ''|[0-9]*|*[!A-Za-z0-9_]*|STATEWRIGHT_*) continue ;; esac
+      case "$name" in ''|[0-9]*|*[!A-Za-z0-9_]*|[Ss][Tt][Aa][Tt][Ee][Ww][Rr][Ii][Gg][Hh][Tt]_*) continue ;; esac
       pairs+=("$pair")
     done < <(printf '%s' "$entry" | jq -j '(.env // {}) | if type == "object" then to_entries[] | select(.value | type == "string") | (.key + "=" + .value + "\u0000") else empty end' 2>/dev/null)
     while IFS= read -r name; do
@@ -364,10 +364,19 @@ upload_client_tools() {
   # program interpolation, no `bash -c` strings.
   local -a mcp_configs=()
   [ -f "$MCP_CONFIG" ] && mcp_configs+=("$MCP_CONFIG")
-  local pconf
+  local pconf plugin_configs=0
   for pconf in "$HOME/.claude/plugins/cache"/*/*/*/.mcp.json; do
-    [ -f "$pconf" ] && statewright_enabled_plugin_config "$pconf" && mcp_configs+=("$pconf")
+    [ -f "$pconf" ] || continue
+    plugin_configs=1
+    statewright_enabled_plugin_config "$pconf" && mcp_configs+=("$pconf")
   done
+  # Without installed_plugins.json no plugin version is known to be installed,
+  # so plugin servers are skipped. Say so once per proxy (no paths or values).
+  if [ "$plugin_configs" = 1 ] && [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] \
+    && [ -z "${STATEWRIGHT_PLUGIN_SCAN_NOTICE_SHOWN:-}" ]; then
+    STATEWRIGHT_PLUGIN_SCAN_NOTICE_SHOWN=1
+    echo "statewright: Claude plugin MCP servers were not scanned for tools (~/.claude/plugins/installed_plugins.json not found); ~/.claude/.mcp.json servers still were." >&2
+  fi
   local disabled_servers
   disabled_servers=$(jq -c '.disabledMcpjsonServers // [] | if type == "array" then map(strings) else [] end' "$HOME/.claude/settings.json" 2>/dev/null || true)
   [ -n "$disabled_servers" ] || disabled_servers='[]'

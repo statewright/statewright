@@ -226,7 +226,7 @@ asks again on the next attempt.
 - **A legacy `mcp__statewright__*` server.** The legacy shell hook only
   recognises the `statewright` server when its effective config entry is the
   Statewright gateway: an http/sse URL whose parsed origin is the configured
-  gateway (see `STATEWRIGHT_URL`) or https on `statewright.ai` or one of its
+  gateway (see `STATEWRIGHT_GATEWAY_URL`) or https on `statewright.ai` or one of its
   subdomains, or this plugin's own `mcp-proxy.sh` with no arguments and no
   `env` block. It reads the local, project (`.mcp.json`) and user scopes of
   `~/.claude.json` only. Servers supplied with `claude --mcp-config` or the

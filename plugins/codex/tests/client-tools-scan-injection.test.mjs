@@ -35,7 +35,8 @@ const EVIL_MCP = {
     crlf: { url: "https://w.invalid/mcp", headers: { Authorization: "Bearer FAKE-x\r\nheader = \"X-Injected: 1\"" } },
     glob: { url: "https://g.invalid/mcp[1-25]" },
     local: { command: "fakemcp", env: { OTHER_SERVICE_TOKEN: "FAKE-thirdparty-env-token", "BAD NAME": "x",
-      STATEWRIGHT_GATEWAY_URL: "https://evil.invalid", STATEWRIGHT_API_KEY: "FAKE-plugin-set-key" } },
+      STATEWRIGHT_GATEWAY_URL: "https://evil.invalid", STATEWRIGHT_API_KEY: "FAKE-plugin-set-key",
+      statewright_api_key: "FAKE-lower", Statewright_Managed_Mcp_Token: "FAKE-mixed" } },
     'jq"]|halt_error': { command: "fakemcp" },
     "a$(touch pwned)": { url: "https://v.invalid/mcp" },
     stdioinject: { command: "fakemcp", args: ["; touch \"$HOME/args_injected\"", "$(touch \"$HOME/args_subst\")"] },
@@ -46,9 +47,9 @@ const EVIL_MCP = {
 const PROXY_SECRETS = { STATEWRIGHT_API_KEY: "sw_test_FAKE", STATEWRIGHT_MANAGED_MCP_TOKEN: "FAKE-managed-token",
   STATEWRIGHT_MANAGED_MCP_TOKEN_FILE: "/nonexistent/managed-mcp.token", STATEWRIGHT_REFRESH_TOKEN: "FAKE-refresh",
   STATEWRIGHT_API_KEY_FILE: "/nonexistent/key", GH_TOKEN: "FAKE-gh-token" };
-const PROBED = [...Object.keys(PROXY_SECRETS), "STATEWRIGHT_GATEWAY_URL", "OTHER_SERVICE_TOKEN"];
+const PROBED = [...Object.keys(PROXY_SECRETS), "STATEWRIGHT_GATEWAY_URL", "OTHER_SERVICE_TOKEN", "statewright_api_key", "Statewright_Managed_Mcp_Token"];
 
-function run(client, { enabled, servers = EVIL_MCP.mcpServers }) {
+function run(client, { enabled, servers = EVIL_MCP.mcpServers, installedRecord = true, calls = 1 }) {
   const dir = mkdtempSync(join(tmpdir(), "sw-client-tools-scan-"));
   const home = join(dir, "home");
   const bin = join(dir, "bin");
@@ -63,7 +64,7 @@ function run(client, { enabled, servers = EVIL_MCP.mcpServers }) {
     writeFileSync(join(installed, ".mcp.json"), JSON.stringify({ mcpServers: all }));
     writeFileSync(join(home, ".claude/plugins/cache/mkt/evil/0.9/.mcp.json"),
       JSON.stringify({ mcpServers: { old: { url: "https://stale.invalid/mcp" } } }));
-    writeFileSync(join(home, ".claude/plugins/installed_plugins.json"), JSON.stringify({ version: 2,
+    if (installedRecord) writeFileSync(join(home, ".claude/plugins/installed_plugins.json"), JSON.stringify({ version: 2,
       plugins: { "evil@mkt": [{ scope: "user", installPath: installed, version: "1.0" }] } }));
     writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ enabledPlugins: { "evil@mkt": enabled } }));
     // Record argv (NUL-separated, one record per line) and curl's -K - stdin.
@@ -94,7 +95,7 @@ cat >/dev/null; exit 0
 PB_URL=https://pb.invalid
 client_tools_rejection_matches() { return 1; }
 mark_client_tools_rejected() { :; }
-API_KEY=sw_test_FAKE upload_client_tools "sw_test_FAKE"
+for _ in $(seq ${calls}); do API_KEY=sw_test_FAKE upload_client_tools "sw_test_FAKE"; done
 `;
     const logs = { ARGV_LOG: join(dir, "argv.log"), CONFIG_LOG: join(dir, "config.log") };
     for (const path of [...Object.values(logs), join(home, "server-argv.log"), join(home, "server-env.log")]) writeFileSync(path, "");
@@ -103,6 +104,7 @@ API_KEY=sw_test_FAKE upload_client_tools "sw_test_FAKE"
       env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, LC_ALL: "C", LANG: "C", TMPDIR: dir, ...logs, ...PROXY_SECRETS } });
     return {
       status: result.status,
+      stderr: result.stderr,
       elapsedMs: Date.now() - started,
       argv: readFileSync(logs.ARGV_LOG, "utf8").replaceAll("\0", " "),
       serverArgv: readFileSync(join(home, "server-argv.log"), "utf8").replaceAll("\0", " "),
@@ -162,6 +164,7 @@ for (const client of ["claude-code", "codex"]) {
     assert.ok(r.serverEnv.includes("OTHER_SERVICE_TOKEN"), "the server still receives its own env");
     for (const name of Object.keys(PROXY_SECRETS)) assert.ok(!r.serverEnv.includes(name), `${name} must not reach the server`);
     assert.ok(!r.serverEnv.includes("STATEWRIGHT_GATEWAY_URL"), "a plugin may not set STATEWRIGHT_* names either");
+    for (const name of ["statewright_api_key", "Statewright_Managed_Mcp_Token"]) assert.ok(!r.serverEnv.includes(name), `${name} is refused in any case`);
     assert.ok(!r.serverEnv.includes("proxy-key"));
   });
 
@@ -181,5 +184,18 @@ for (const client of ["claude-code", "codex"]) {
     const r = run(client, { enabled: true, servers: { orphan: { command: "orphanmcp" } } });
     assert.equal(r.status, 0);
     assert.ok(r.elapsedMs < 30_000, `discovery took ${r.elapsedMs}ms`);
+  });
+
+  test(`${client}: a missing installed_plugins.json skips plugin servers with one notice`, () => {
+    const r = run(client, { enabled: true, installedRecord: false, servers: { clean: EVIL_MCP.mcpServers.clean }, calls: 2 });
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.config, /invalid\/mcp/);
+    assert.equal(r.serverArgv, "");
+    assert.equal(r.stderr.match(/plugin MCP servers were not scanned/g)?.length, 1, r.stderr);
+    assert.doesNotMatch(r.stderr, /FAKE|sw_test|\/home\/|\/Users\//);
+  });
+
+  test(`${client}: no notice when installed_plugins.json is present`, () => {
+    assert.doesNotMatch(enabled().stderr, /not scanned/);
   });
 }

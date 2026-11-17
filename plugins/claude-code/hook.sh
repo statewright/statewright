@@ -136,12 +136,18 @@ statewright_direct_server_trusted() {
   #   there are no arguments or env (a decoy url, the proxy path passed as an
   #   argument to another program, or an env block that redirects the proxy
   #   with STATEWRIGHT_GATEWAY_URL or runs code with BASH_ENV is not trusted).
-  local kind
-  kind=$(printf '%s' "$entry" | jq -r --arg proxy "$SCRIPT_DIR/mcp-proxy.sh" '
+  #   An oauth block must be exactly the plugin's shipped one (or absent), so
+  #   a repo-supplied entry can't pick its own clientId or callbackPort.
+  local kind plugin_oauth
+  plugin_oauth=$(jq -c '.mcpServers.statewright.oauth // null | if type == "object" then . else null end' \
+    "$SCRIPT_DIR/.mcp.json" 2>/dev/null || true)
+  [ -n "$plugin_oauth" ] || plugin_oauth=null
+  kind=$(printf '%s' "$entry" | jq -r --arg proxy "$SCRIPT_DIR/mcp-proxy.sh" --argjson oauth "$plugin_oauth" '
     if type != "object" then "untrusted"
     elif has("url") then
       ((.type // "http") as $t
         | if (keys - ["type", "url", "oauth"]) != [] then "untrusted"
+          elif has("oauth") and ($oauth == null or .oauth != $oauth) then "untrusted"
           elif (.url | type) != "string" then "untrusted"
           elif ($t == "http" or $t == "sse" or $t == "streamable-http") then "remote"
           else "untrusted" end)

@@ -184,7 +184,23 @@ for config in \
   printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
     || fail "a statewright entry with identity headers must not bypass the gate ($config; got: $out)"
 done
-printf '%s' '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","oauth":{"clientId":"statewright-claude","callbackPort":54545,"scopes":"mcp"}}}}' > "$TMP/home/.claude.json"
+# The oauth block must be exactly the plugin's shipped one (or absent).
+plugin_oauth=$(jq -c '.mcpServers.statewright.oauth' "$ROOT/.mcp.json")
+for oauth in \
+  "$(printf '%s' "$plugin_oauth" | jq -c '.clientId = "attacker-client"')" \
+  "$(printf '%s' "$plugin_oauth" | jq -c '.callbackPort = 61234')" \
+  "$(printf '%s' "$plugin_oauth" | jq -c '.authServerMetadataUrl = "https://evil.example/.well-known"')" \
+  "$(printf '%s' "$plugin_oauth" | jq -c 'del(.scopes)')" \
+  'null' '"x"' '{}'; do
+  jq -cn --argjson o "$oauth" '{mcpServers:{statewright:{type:"http",url:"https://mcp.statewright.ai/mcp",oauth:$o}}}' > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "a statewright entry with foreign oauth settings must not bypass the gate ($oauth; got: $out)"
+done
+printf '%s' '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp"}}}' > "$TMP/home/.claude.json"
+out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+[ -z "$out" ] || fail "an entry without oauth should be trusted (got: $out)"
+jq -c '{mcpServers:{statewright:.mcpServers.statewright}}' "$ROOT/.mcp.json" > "$TMP/home/.claude.json"
 out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
 [ -z "$out" ] || fail "the plugin's own {type,url,oauth} entry should be trusted (got: $out)"
 # R4/P5: the entry must be one Claude would run as the gateway. A decoy url on

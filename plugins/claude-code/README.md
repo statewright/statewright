@@ -209,11 +209,30 @@ asks again on the next attempt.
   plugin's store is readable by the same user. Statewright therefore treats
   reads of these stores (`security find-generic-password`, `dump-keychain`,
   `.credentials.json`, `secret-tool lookup`, Statewright's own key files) as
-  known risk: they are denied and never offered for review. That screen is
-  lexical and best effort; Claude's own permission prompt is the other control.
+  known risk: they are denied and never offered for review. Claude's own
+  permission prompt is the other control.
+
+  The screen reads the command text, not the filesystem. Before matching it
+  removes shell quoting, maps `~user`, `$HOME` and `${HOME...}` to `~`,
+  resolves `.` and `..` segments, and treats a glob as the paths it could
+  expand to, so `cat ~/.claude/.cred*`, `cp -r ~/.cla* /tmp/x`,
+  `cp -r ~/.config/../.claude /tmp/x` and `tar -C ~ .` are all caught. It
+  cannot follow state the shell builds up, so these are **not** caught and
+  rely on Claude's permission prompt:
+  - a relative path after changing directory in a separate step
+    (`cd; cd .claude; cat .??*`), or a symlink made by an earlier command;
+  - `find` predicates (`find ~ -name '*credentials*' -exec cat {} +`);
+  - paths assembled in a script or variable (`python3 -c "open(p + 'entials.json')"`).
 - **A legacy `mcp__statewright__*` server.** The legacy shell hook only
-  recognises the `statewright` server when its configured URL is a Statewright
-  gateway (see `STATEWRIGHT_URL`).
+  recognises the `statewright` server when its effective config entry is the
+  Statewright gateway: an http/sse URL whose parsed origin is the configured
+  gateway (see `STATEWRIGHT_URL`) or https on `statewright.ai` or one of its
+  subdomains, or this plugin's own `mcp-proxy.sh` with no arguments and no
+  `env` block. It reads the local, project (`.mcp.json`) and user scopes of
+  `~/.claude.json` only. Servers supplied with `claude --mcp-config` or the
+  system `managed-mcp.json` are not seen, so a user-scope entry decides even
+  when one of those overrides it; don't rely on the legacy hook if you launch
+  Claude with either.
 
 ## Development
 

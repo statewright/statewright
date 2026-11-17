@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import test from "node:test";
 
-const hook = resolve("plugins/claude-code/hook.sh");
+// Resolve from this file, not the cwd, so the suite runs from any directory.
+const plugin = (name) => fileURLToPath(new URL(`../${name}`, import.meta.url));
+const hook = plugin("hook.sh");
 
 async function runHook(input, environment, endpoint = "post-tool") {
   return await new Promise((resolveResult, rejectResult) => {
@@ -166,7 +169,7 @@ test("Claude MCP proxy forwards managed sessions through the supervisor bridge",
   const address = server.address();
   const root = await mkdtemp(join(tmpdir(), "statewright-claude-proxy-"));
   try {
-    const child = spawn("bash", [resolve("plugins/claude-code/mcp-proxy.sh")], {
+    const child = spawn("bash", [plugin("mcp-proxy.sh")], {
       env: {
         ...process.env,
         HOME: root,
@@ -181,7 +184,10 @@ test("Claude MCP proxy forwards managed sessions through the supervisor bridge",
     child.stdin.write('{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}\n');
     await new Promise((resolveOutput) => setTimeout(resolveOutput, 100));
     child.stdin.end('{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}\n');
+    // The proxy may already have exited during the pause above; waiting for
+    // a later "exit" event would hang the file with the server still open.
     await new Promise((resolveExit, rejectExit) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolveExit();
       child.once("error", rejectExit);
       child.once("exit", resolveExit);
     });

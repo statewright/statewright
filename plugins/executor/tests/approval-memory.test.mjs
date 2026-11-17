@@ -335,9 +335,9 @@ test("tampered, malformed and permissive records cannot manufacture approval",as
   const f=await fixture(t),memory=f.make();const grant=await memory.remember(context,"2h");
   const path=join(memory.root,grant.id+".json"),value=JSON.parse(await readFile(path,"utf8"));
   value.grant.duration="always";value.grant.expires_at=null;await writeFile(path,JSON.stringify(value));
-  await assert.rejects(memory.lookup(context),/record_invalid/);
+  assert.equal(await memory.lookup(context),null);
   const bytes=await readFile(path,"utf8");assert(!bytes.includes(context.invocation_sha256));assert(!bytes.includes("principal/project"));
-  assert((await readdir(memory.root)).includes("key"));
+  assert(!(await readdir(memory.root)).includes("key"));
   assert.equal(approvalMemoryContext({...context,policy_sha256:null}),null);
   await assert.rejects(memory.remember(context,"once"),/duration_invalid/);
 });

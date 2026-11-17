@@ -40,11 +40,19 @@ import { createErrorReporter, isExpectedPluginError } from "./lib/error-reportin
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 
+// Since the Claude host became plugin-native (ccb5567), its hooks never get the
+// bridge bearer, so a legacy `--host claude` launch can only deny every tool
+// call and block every Stop. Refuse it up front instead.
+export const LEGACY_CLAUDE_HOST_MESSAGE = "--host claude is no longer supported by statewright-exec. "
+  + "Install the Statewright Claude Code plugin and run `claude` directly (or `statewright-managed-client --host claude`); "
+  + "the plugin connects to Statewright through Claude's own MCP sign-in.";
+const LAUNCHABLE_HOSTS = SUPPORTED_HOSTS.filter((host) => host !== "claude");
+
 const HELP = `Usage:
   statewright-exec --host HOST --workflow NAME [options] -- TASK
 
 Required:
-  --host HOST                ${SUPPORTED_HOSTS.join(", ")}
+  --host HOST                ${LAUNCHABLE_HOSTS.join(", ")} (Claude: use the Claude Code plugin)
   --workflow NAME            Statewright workflow to load
 
 Session:
@@ -121,7 +129,8 @@ function parseArgs(argv) {
   return options;
 }
 
-function validateOptions(options) {
+export function validateOptions(options) {
+  if (options.host === "claude") throw new Error(LEGACY_CLAUDE_HOST_MESSAGE);
   if (!SUPPORTED_HOSTS.includes(options.host)) {
     throw new Error(`--host must be one of: ${SUPPORTED_HOSTS.join(", ")}.`);
   }
@@ -130,7 +139,7 @@ function validateOptions(options) {
   }
   if (!options.prompt) throw new Error("Provide the task after '--'.");
   if (options.resumeWorkflow && !options.executorSessionId) throw new Error("--resume-workflow requires an explicit --executor-session-id");
-  if (options.resumeWorkflow && !["pi", "claude", "cursor"].includes(options.host)) {
+  if (options.resumeWorkflow && !["pi", "cursor"].includes(options.host)) {
     throw new Error("Exact native-session resume is not yet supported for this executor host");
   }
   assertHostOwnershipArgs(options);

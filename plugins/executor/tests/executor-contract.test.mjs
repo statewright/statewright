@@ -3,11 +3,16 @@ import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   assertHostAdapterContract,
   executorAgentEnvironment,
+  LEGACY_CLAUDE_HOST_MESSAGE,
   resolvePluginsRoot,
+  validateOptions,
 } from "../statewright-exec.mjs";
+import { isExpectedPluginError } from "../lib/error-reporting.mjs";
 import { ExecutorLease, validateExecutorLease } from "../lib/executor-lease.mjs";
 
 test("executor environment binds all adapters to one transport identity", () => {
@@ -176,4 +181,19 @@ test("delivery owner is a fresh matching lease, not an environment marker", asyn
     lease.stop();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("legacy --host claude is refused up front with a plugin pointer", () => {
+  const options = { host: "claude", workflow: "plan", prompt: "fixture", hostArgs: [] };
+  assert.throws(() => validateOptions(options), (error) => error.message === LEGACY_CLAUDE_HOST_MESSAGE);
+  assert.match(LEGACY_CLAUDE_HOST_MESSAGE, /Claude Code plugin/);
+  assert.ok(isExpectedPluginError(new Error(LEGACY_CLAUDE_HOST_MESSAGE)), "a usage refusal is not a crash report");
+  assert.doesNotThrow(() => validateOptions({ ...options, host: "pi" }));
+  const cli = spawnSync(process.execPath, [fileURLToPath(new URL("../statewright-exec.mjs", import.meta.url)),
+    "--host", "claude", "--workflow", "plan", "--", "fixture"], {
+    encoding: "utf8", timeout: 20_000,
+    env: { PATH: process.env.PATH, HOME: tmpdir(), STATEWRIGHT_API_KEY: "sw_test_FAKE", STATEWRIGHT_SENTRY_DISABLED: "1" },
+  });
+  assert.equal(cli.status, 1);
+  assert.match(cli.stderr, /--host claude is no longer supported/);
 });

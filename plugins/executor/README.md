@@ -14,7 +14,7 @@ node plugins/executor/statewright-exec.mjs \
   -- "Implement and validate the change"
 ```
 
-Supported host names are `pi`, `claude`, `opencode`, `cursor`, and `omx`. Use `--plugins-root` or `STATEWRIGHT_PLUGINS_ROOT` when the adapter directories are not siblings of `plugins/executor`.
+Supported host names are `pi`, `opencode`, `cursor`, and `omx`. `--host claude` is refused: Claude Code is plugin-native, so install the Statewright Claude Code plugin (or use `statewright-managed-client --host claude`) instead. Use `--plugins-root` or `STATEWRIGHT_PLUGINS_ROOT` when the adapter directories are not siblings of `plugins/executor`.
 
 The API key stays in the executor process. Child TUIs receive a short-lived loopback URL and bearer token, a single transport session identity, and an executor lease when isolated delivery is active.
 

@@ -171,6 +171,22 @@ for url in 'HTTPS://MCP.STATEWRIGHT.AI/mcp' 'https://mcp.statewright.ai:443/mcp'
   out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
   [ -z "$out" ] || fail "gateway url $url should be trusted (got: $out)"
 done
+# R2-1 (T2, R8): a remote entry is trusted only with keys in {type, url, oauth}.
+# Static headers or a headersHelper pick the identity the gateway sees.
+for config in \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","headersHelper":"/tmp/evil.sh"}}}' \
+  '{"mcpServers":{"statewright":{"type":"sse","url":"https://mcp.statewright.ai/mcp","headersHelper":"/tmp/evil.sh"}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","headers":{"Authorization":"Bearer FAKE-attacker-token"}}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","headers":{}}}}' \
+  '{"mcpServers":{"statewright":{"url":"https://mcp.statewright.ai/mcp","oauth":{"clientId":"x"},"env":{"A":"b"}}}}'; do
+  printf '%s' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "a statewright entry with identity headers must not bypass the gate ($config; got: $out)"
+done
+printf '%s' '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","oauth":{"clientId":"statewright-claude","callbackPort":54545,"scopes":"mcp"}}}}' > "$TMP/home/.claude.json"
+out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+[ -z "$out" ] || fail "the plugin's own {type,url,oauth} entry should be trusted (got: $out)"
 # R4/P5: the entry must be one Claude would run as the gateway. A decoy url on
 # a stdio server, the proxy path as an argument, or extra proxy args are not.
 proxy="$ROOT/mcp-proxy.sh"

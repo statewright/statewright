@@ -128,7 +128,10 @@ statewright_direct_server_trusted() {
   [ -n "$entry" ] || entry=$(jq -c '.mcpServers.statewright // empty' "$HOME/.claude.json" 2>/dev/null || true)
   [ -n "$entry" ] || return 1
   # The entry's shape must be one Claude would actually run as the gateway:
-  # - remote: http/sse (or untyped) with a string url and no command/args;
+  # - remote: http/sse (or untyped) with a string url and no keys beyond
+  #   type, url and oauth (the plugin's own .mcp.json shape). Static
+  #   `headers` or a `headersHelper` would choose the identity the gateway
+  #   sees, so any extra key, including command/args, is untrusted;
   # - stdio: no url field, the command is exactly this plugin's proxy, and
   #   there are no arguments or env (a decoy url, the proxy path passed as an
   #   argument to another program, or an env block that redirects the proxy
@@ -138,7 +141,7 @@ statewright_direct_server_trusted() {
     if type != "object" then "untrusted"
     elif has("url") then
       ((.type // "http") as $t
-        | if (has("command") or has("args")) then "untrusted"
+        | if (keys - ["type", "url", "oauth"]) != [] then "untrusted"
           elif (.url | type) != "string" then "untrusted"
           elif ($t == "http" or $t == "sse" or $t == "streamable-http") then "remote"
           else "untrusted" end)

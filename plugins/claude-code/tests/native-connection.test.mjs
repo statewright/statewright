@@ -1904,6 +1904,25 @@ test('an unattributable Stop never borrows another conversation\'s enforcing vie
     assert.equal(stop.block, undefined, JSON.stringify(e));
     assert.match(stop.systemMessage, /could not tell which conversation/);
   }
+  await h.flush();
+  assert.match(h.state.diagnostics?.map(d => d.init.body).join('\n') ?? '', /Statewright stop: session_unbound/, 'an unattributed Stop is reported');
+});
+
+test('a Stop handler error allows the stop with a warning, never from the shared view', async () => {
+  const h = await workflowHost();
+  await h.find(await h.pane(), 'workflow').props.onSelect('plan');
+  await h.press('start');
+  const fallback = h.hooks.find(x => x.name === 'classic.Stop').fallback;
+  assert.equal(typeof fallback, 'function');
+  for (const e of [{ session_id: h.state.session, stop_hook_active: true }, { session_id: h.state.session, stop_hook_active: false }, {}]) {
+    for (let i = 0; i < 4; i++) {
+      const stop = await fallback(h.$, e);
+      assert.equal(stop.block, undefined, `the enforcing shared view must not hold a failed Stop (${JSON.stringify(e)})`);
+      assert.match(stop.systemMessage, /could not check this stop/);
+    }
+  }
+  await h.flush();
+  assert.match(h.state.diagnostics?.map(d => d.init.body).join('\n') ?? '', /Statewright stop: control_hook_failed/);
 });
 
 for (const payload of ['stop_hook_active', 'no stop_hook_active']) test(`an unconfirmable Stop blocks at most 3 times, then warns (${payload})`, async () => {

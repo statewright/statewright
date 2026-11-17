@@ -1056,6 +1056,7 @@ export function register(on, options = {}) {
   const unconfirmedStop = 'Statewright could not confirm workflow completion. Read its state or turn it Off.';
   const releasedStop = `Statewright could not confirm workflow completion after ${MAX_UNCONFIRMED_STOPS} attempts, so Claude was allowed to stop. The workflow may still be active: open /statewright to check its state or turn it Off.`;
   const unattributedStop = 'Statewright could not tell which conversation is stopping, so it did not hold this stop. Open /statewright to check the workflow state.';
+  const failedStopMessage = 'Statewright could not check this stop, so it did not hold it. The workflow may still be active: open /statewright to check its state or turn it Off.';
   const unconfirmedStops = new Map();
   const enforcingStop = v => Boolean(v?.requiresEnforcement && !v.routeError && !v.native?.state?.pending_approval);
   const stopSession = e => (typeof e?.session_id === 'string' && e.session_id ? e.session_id : '');
@@ -1076,21 +1077,26 @@ export function register(on, options = {}) {
     if (unconfirmedStops.size > 256) unconfirmedStops.delete(unconfirmedStops.keys().next().value);
     return { ...result, block: unconfirmedStop };
   };
-  const failedStop = (e, result) => {
-    const v = stopSession(e) === view.conversation || !stopSession(e) ? view : null;
-    if (v && v.conversation && enforcingStop(v)) return unconfirmed(e, v.conversation, result);
-    return enforcingStop(view) ? { ...result, systemMessage: unattributedStop } : result;
+  // An unexpected error in the Stop handler itself allows the stop with a
+  // warning; it never decides from the shared module view.
+  const failedStop = ($, result) => {
+    reportDiagnostic($, view, 'control_hook_failed', 'stop', 'control');
+    return { ...result, systemMessage: failedStopMessage };
   };
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e);
     const v = await stopView($, e);
-    if (!v) return enforcingStop(view) ? { ...result, systemMessage: unattributedStop } : result;
+    if (!v) {
+      if (!enforcingStop(view)) return result;
+      reportDiagnostic($, view, 'session_unbound', 'stop', 'control');
+      return { ...result, systemMessage: unattributedStop };
+    }
     if (result?.block || !enforcingStop(v)) { confirmedStop(v.conversation); return result; }
     let decision;
     try { decision = outcome(await nativeRequest($, 'stop', {})); } catch { return unconfirmed(e, v.conversation, result); }
     confirmedStop(v.conversation);
     return decision.decision === 'block' ? { ...result, block: decision.reason } : result;
-  }).catch(($, e) => failedStop(e, {}));
+  }).catch($ => failedStop($, {}));
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
       const v = await current($);

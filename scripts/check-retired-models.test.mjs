@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {spawnSync} from 'node:child_process';
-import {mkdtempSync, writeFileSync} from 'node:fs';
+import {execFileSync, spawnSync} from 'node:child_process';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {
@@ -106,6 +106,27 @@ test('the checker exits 0 against the real worktree', () => {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('the checker exits 1 when a retired id is planted on the public surface of a temp tree', () => {
+  const source = repoRootFromScript();
+  const root = mkdtempSync(join(tmpdir(), 'retired-models-negative-'));
+  try {
+    writeFileSync(
+      join(root, 'README.md'),
+      `${readFileSync(join(source, 'README.md'), 'utf8')}\nclaude-sonnet-4-20250514\n`,
+    );
+    execFileSync('git', ['init', '-q'], {cwd: root});
+    execFileSync('git', ['add', 'README.md'], {cwd: root});
+    const result = spawnSync(process.execPath, [join(source, 'scripts/check-retired-models.mjs'), root], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, /README\.md:\d+:claude-sonnet-4-20250514/);
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });
 
 test('upcoming retirement warnings use a fixed clock and a 30-day inclusive window', () => {

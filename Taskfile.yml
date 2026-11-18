@@ -266,6 +266,7 @@ tasks:
             echo "gateway-v${major}.${minor}.$((patch + 1))"
           fi
     cmds:
+      - task: check:pre-release
       - "{{.CARGO}} test --workspace"
       - echo "Tagging {{.NEXT_VERSION}}..."
       - git tag -a {{.NEXT_VERSION}} -m "Release {{.NEXT_VERSION}}"

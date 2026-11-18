@@ -17,7 +17,7 @@ The sweep is also wired into `task test:plugin-release` and `task release`.
 
 ## Retired and deprecated model IDs
 
-The catalog lives at [`scripts/retired-model-ids.json`](../scripts/retired-model-ids.json).
+The catalog lives at [`scripts/retired-model-ids.json`](../../scripts/retired-model-ids.json).
 `scripts/check-retired-models.mjs` scans tracked files (`git ls-files`) and
 fails on a whole-token match of any catalog id in the public surface: `README.md`,
 `docs/`, `templates/`, `examples/`, and plugin `README.md`, `docs/`, and

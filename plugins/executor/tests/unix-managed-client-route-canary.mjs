@@ -22,6 +22,16 @@ async function waitFor(file, timeoutMs = 5_000) {
   throw new Error(`Timed out waiting for ${file}`);
 }
 
+function assertOrderedArgs(args, expected) {
+  let offset = 0;
+  for (const [flag, value] of expected) {
+    const index = args.findIndex((arg, position) =>
+      position >= offset && arg === flag && (value === undefined || args[position + 1] === value));
+    assert.ok(index >= offset, `managed client argv must include ${flag} in route order`);
+    offset = index + (value === undefined ? 1 : 2);
+  }
+}
+
 function bridgeFactory() {
   let number = 0;
   return () => {
@@ -138,11 +148,24 @@ setInterval(() => {
   const primaryInvocations = (await readFile(primaryCalls, "utf8")).trim().split("\n").map(JSON.parse);
   const peerInvocations = (await readFile(peerCalls, "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(primaryInvocations.length, 3, "primary managed client must consume both same-file route receipts");
-  assert.deepEqual(primaryInvocations[0].args.slice(0, 5), ["-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="low"', "--full-auto"]);
-  assert.deepEqual(primaryInvocations[1].args.slice(0, 8), ["-m", "gpt-5.6-terra", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"', "--full-auto", "resume"]);
-  assert.deepEqual(primaryInvocations[2].args.slice(0, 8), ["-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"', "--full-auto", "resume"]);
-  assert.equal(primaryInvocations[1].args[8], "managed-route-canary-thread");
-  assert.equal(primaryInvocations[2].args[8], "managed-route-canary-thread");
+  assert.equal(peerInvocations.length, 1, "the peer terminal must not be restarted by the primary route");
+  for (const { args } of [...primaryInvocations, ...peerInvocations]) {
+    assert.ok(args[0] === "-c" && args[1]?.startsWith("shell_environment_policy.exclude="),
+      "managed Codex argv must start with a credential-exclude policy");
+  }
+  assertOrderedArgs(primaryInvocations[0].args, [
+    ["-m", "gpt-5.6-terra"], ["-c", 'model_reasoning_effort="low"'], ["--full-auto"],
+  ]);
+  assertOrderedArgs(primaryInvocations[1].args, [
+    ["-m", "gpt-5.6-terra"], ["-c", 'model_provider="openai"'],
+    ["-c", 'model_reasoning_effort="medium"'], ["--full-auto"],
+    ["resume", "managed-route-canary-thread"],
+  ]);
+  assertOrderedArgs(primaryInvocations[2].args, [
+    ["-m", "gpt-5.6-sol"], ["-c", 'model_provider="openai"'],
+    ["-c", 'model_reasoning_effort="high"'], ["--full-auto"],
+    ["resume", "managed-route-canary-thread"],
+  ]);
   assert.equal(primaryInvocations[1].route.run_id, "managed-route-canary-run");
   assert.equal(primaryInvocations[1].route.state, "localize");
   assert.equal(primaryInvocations[2].route.run_id, "managed-route-canary-run");
@@ -152,7 +175,6 @@ setInterval(() => {
     assert.equal(primaryInvocations[0].bridge_url, invocation.bridge_url, "the routed child must retain the bridge");
     assert.equal(primaryInvocations[0].control_dir, invocation.control_dir, "the routed child must retain its control boundary");
   }
-  assert.equal(peerInvocations.length, 1, "the peer terminal must not be restarted by the primary route");
   assert.notEqual(peerInvocations[0].client_id, primaryInvocations[0].client_id, "peer terminal must own a distinct managed identity");
   assert.notEqual(peerInvocations[0].bridge_url, primaryInvocations[0].bridge_url, "peer terminal must own a distinct bridge");
   assert.notEqual(peerInvocations[0].control_dir, primaryInvocations[0].control_dir, "peer terminal must own a distinct control boundary");

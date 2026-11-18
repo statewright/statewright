@@ -8,6 +8,16 @@ if (process.platform !== "win32") {
   throw new Error("The Windows managed-client route canary must run on a Windows runner.");
 }
 
+function assertOrderedArgs(args, expected) {
+  let offset = 0;
+  for (const [flag, value] of expected) {
+    const index = args.findIndex((arg, position) =>
+      position >= offset && arg === flag && (value === undefined || args[position + 1] === value));
+    assert.ok(index >= offset, `managed client argv must include ${flag} in route order`);
+    offset = index + (value === undefined ? 1 : 2);
+  }
+}
+
 function fakeBridgeFactory() {
   return {
     url: "http://127.0.0.1:9999",
@@ -91,8 +101,15 @@ if (!existsSync(marker)) {
     `the managed .cmd launcher must exit cleanly after its routed restart; received ${JSON.stringify(invocations[1]?.args)}`,
   );
   assert.equal(invocations.length, 2, "the .cmd launcher must run once before and once after routing");
+  for (const { args } of invocations) {
+    assert.ok(args[0] === "-c" && args[1]?.startsWith("shell_environment_policy.exclude="),
+      "managed Codex argv must start with a credential-exclude policy");
+  }
   assert.ok(invocations[0].args.includes("--full-auto"));
-  assert.deepEqual(invocations[1].args.slice(0, 8), ["-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"', "--full-auto", "resume"]);
+  assertOrderedArgs(invocations[1].args, [
+    ["-m", "gpt-5.6-sol"], ["-c", 'model_provider="openai"'],
+    ["-c", 'model_reasoning_effort="high"'], ["--full-auto"], ["resume"],
+  ]);
   assert.equal(invocations[0].client_id, invocations[1].client_id, "managed identity must survive the routed restart");
   assert.match(invocations[0].client_id, /^swc_[a-f0-9]{32}$/);
   assert.equal(invocations[0].bridge_url, "http://127.0.0.1:9999");

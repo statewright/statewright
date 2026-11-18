@@ -30,6 +30,12 @@ tasks:
       - node plugins/claude-code/scripts/sync-runtime.mjs --sync
       - node plugins/claude-code/scripts/sync-runtime.mjs --check
 
+  check:pre-release:
+    desc: "Pre-release outdatedness sweep (retired model IDs fail; other findings warn)"
+    cmds:
+      - node --test scripts/check-retired-models.test.mjs scripts/pre-release-outdatedness.test.mjs
+      - node scripts/pre-release-outdatedness.mjs
+
   test:plugin-release:
     desc: "Run the complete local validation gate for every supported plugin release"
     env:
@@ -38,6 +44,7 @@ tasks:
       # void plugin Stop-contract tests (docs/research/003; W2-R4 receipt).
       STATEWRIGHT_STOP_CONTINUATION: "1"
     cmds:
+      - task: check:pre-release
       - node --test scripts/host-compatibility.test.mjs
       - node plugins/executor/scripts/sync-error-reporting.mjs --check
       - node plugins/codex/scripts/sync-executor-core.mjs --check
@@ -186,6 +193,7 @@ tasks:
   test:
     desc: "Run all workspace tests"
     cmds:
+      - task: check:pre-release
       - "{{.CARGO}} test --workspace"
 
   test:approval-auth:

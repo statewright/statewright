@@ -1,0 +1,1 @@
+current sonnet id claude-sonnet-5-5 and openai replacement gpt-5.6-sol plus gpt-4.1 alias.

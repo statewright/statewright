@@ -1,0 +1,1 @@
+example default_model uses claude-sonnet-4-20250514 in a listing.

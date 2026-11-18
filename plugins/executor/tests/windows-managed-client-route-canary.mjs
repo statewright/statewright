@@ -45,6 +45,7 @@ appendFileSync(calls, JSON.stringify({
   client_id: process.env.STATEWRIGHT_CLIENT_ID,
   bridge_url: process.env.STATEWRIGHT_MANAGED_MCP_URL,
   bridge_token: process.env.STATEWRIGHT_MANAGED_MCP_TOKEN,
+  token_file: process.env.STATEWRIGHT_MANAGED_MCP_TOKEN_FILE,
   control_dir: control,
 }) + "\\n");
 const marker = join(control, "route-written");
@@ -114,8 +115,12 @@ if (!existsSync(marker)) {
   assert.match(invocations[0].client_id, /^swc_[a-f0-9]{32}$/);
   assert.equal(invocations[0].bridge_url, "http://127.0.0.1:9999");
   assert.equal(invocations[1].bridge_url, invocations[0].bridge_url, "managed bridge URL must survive the routed restart");
-  assert.equal(invocations[0].bridge_token, "windows-route-canary");
-  assert.equal(invocations[1].bridge_token, invocations[0].bridge_token, "managed bridge token must survive the routed restart");
+  assert.equal(invocations[0].bridge_token, undefined, "managed Codex must not carry the bridge token in env");
+  assert.equal(invocations[1].bridge_token, undefined, "the routed child must not carry the bridge token in env");
+  assert.equal(typeof invocations[0].token_file, "string", "managed Codex must receive a bridge token file path");
+  assert.equal(invocations[1].token_file, invocations[0].token_file, "managed bridge token file must survive the routed restart");
+  assert.equal(invocations[0].token_file, join(invocations[0].control_dir, "managed-mcp.token"));
+  assert.ok(await readFile(invocations[0].token_file, "utf8") === "windows-route-canary", "token file carries the bridge token");
   assert.equal(invocations[1].control_dir, invocations[0].control_dir, "the routed child must reuse the same control directory");
   await assert.rejects(access(invocations[0].control_dir), { code: "ENOENT" }, "the control directory must be removed after the supervisor exits");
   console.log("Windows managed-client route canary passed for a .cmd launcher.");

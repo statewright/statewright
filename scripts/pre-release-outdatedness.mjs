@@ -8,6 +8,7 @@ import {
   loadCatalog,
   repoRootFromScript,
   scanTrackedFiles,
+  upcomingRetirementWarnings,
 } from './check-retired-models.mjs';
 
 export const CURRENT_MCP_PROTOCOL_VERSION = '2026-07-28';
@@ -382,7 +383,7 @@ export function collectDocsAndPinFindings(root, {files} = {}) {
   return findings;
 }
 
-export function runSweep(root, {includeDependencyAudits = true, catalog = loadCatalog()} = {}) {
+export function runSweep(root, {includeDependencyAudits = true, catalog = loadCatalog(), now} = {}) {
   const modelFindings = scanTrackedFiles(root, {catalog}).map((finding) => ({
     category: 'model-id',
     path: finding.path,
@@ -393,19 +394,21 @@ export function runSweep(root, {includeDependencyAudits = true, catalog = loadCa
     id: finding.id,
     replacement: finding.replacement,
   }));
+  const retirementFindings = upcomingRetirementWarnings(catalog, now ? {now} : {});
   const docsFindings = collectDocsAndPinFindings(root);
   const dependencyFindings = includeDependencyAudits ? runDependencyAudits(root) : [];
-  return {modelFindings, docsFindings, dependencyFindings};
+  return {modelFindings, retirementFindings, docsFindings, dependencyFindings};
 }
 
-export function sweepHasFailures({modelFindings, docsFindings, dependencyFindings}) {
-  return [...modelFindings, ...docsFindings, ...dependencyFindings].some((finding) => finding.severity === 'fail');
+export function sweepHasFailures({modelFindings, retirementFindings = [], docsFindings, dependencyFindings}) {
+  return [...modelFindings, ...retirementFindings, ...docsFindings, ...dependencyFindings].some((finding) => finding.severity === 'fail');
 }
 
-export function formatSweepReport({modelFindings, docsFindings, dependencyFindings}) {
+export function formatSweepReport({modelFindings, retirementFindings = [], docsFindings, dependencyFindings}) {
   const lines = ['Pre-release outdatedness sweep', ''];
   const sections = [
     ['Retired or deprecated model IDs', modelFindings],
+    ['Upcoming retirements (within 30 days)', retirementFindings],
     ['Docs, MCP spec, CLI flags, and version pins', docsFindings],
     ['Dependencies (audit / outdated)', dependencyFindings],
   ];

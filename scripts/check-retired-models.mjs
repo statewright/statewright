@@ -65,14 +65,20 @@ export function isTokenBoundaryAfter(text, end) {
   return !isModelIdChar(ch);
 }
 
+export const CASE_INSENSITIVE_ID_MIN_LENGTH = 4;
+
 export function findModelIdMatches(text, models) {
   const findings = [];
   for (const model of models) {
+    // Short IDs stay case-sensitive so plan codes such as "O1" do not match "o1".
+    const caseInsensitive = model.id.length >= CASE_INSENSITIVE_ID_MIN_LENGTH;
+    const haystack = caseInsensitive ? text.toLowerCase() : text;
+    const needle = caseInsensitive ? model.id.toLowerCase() : model.id;
     let from = 0;
-    while (from <= text.length - model.id.length) {
-      const index = text.indexOf(model.id, from);
+    while (from <= haystack.length - needle.length) {
+      const index = haystack.indexOf(needle, from);
       if (index === -1) break;
-      const end = index + model.id.length;
+      const end = index + needle.length;
       if (isTokenBoundaryBefore(text, index) && isTokenBoundaryAfter(text, end)) {
         const line = text.slice(0, index).split('\n').length;
         findings.push({index, line, id: model.id, status: model.status, replacement: model.replacement ?? null});
@@ -81,6 +87,45 @@ export function findModelIdMatches(text, models) {
     }
   }
   findings.sort((a, b) => a.line - b.line || a.id.localeCompare(b.id));
+  return findings;
+}
+
+export const UPCOMING_RETIREMENT_WINDOW_DAYS = 30;
+
+export function utcDay(date) {
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+export function parseIsoDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ''));
+  if (!match) return null;
+  return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+/** Warn when a deprecated catalog ID retires or shuts down within `windowDays` of `now` (inclusive). */
+export function upcomingRetirementWarnings(catalog, {
+  now = new Date(),
+  windowDays = UPCOMING_RETIREMENT_WINDOW_DAYS,
+} = {}) {
+  const start = utcDay(now);
+  const end = start + windowDays * 24 * 60 * 60 * 1000;
+  const findings = [];
+  for (const model of catalog.models) {
+    if (model.status !== 'deprecated') continue;
+    const retired = parseIsoDate(model.retired_on);
+    if (retired == null || retired < start || retired > end) continue;
+    const days = Math.round((retired - start) / (24 * 60 * 60 * 1000));
+    const when = days === 0 ? 'today' : `in ${days} day${days === 1 ? '' : 's'}`;
+    findings.push({
+      category: 'upcoming-retirement',
+      path: 'scripts/retired-model-ids.json',
+      line: null,
+      issue: `${model.id} is deprecated and retires ${when} (${model.retired_on})`,
+      source: model.source,
+      severity: 'warn',
+      id: model.id,
+    });
+  }
   return findings;
 }
 

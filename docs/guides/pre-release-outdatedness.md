@@ -1,9 +1,10 @@
 # Pre-release outdatedness sweep
 
 `task check:pre-release` runs a focused public-surface outdatedness sweep before
-a release. Retired or deprecated LLM model IDs are a hard failure. Dependency
-audits, older MCP specification dates, documented CLI flags, and stale version
-pins are reported as warnings unless a local asset is clearly missing.
+a release. Retired or deprecated LLM model IDs on the public surface are a hard
+failure. Dependency audits, older MCP specification dates, documented CLI flags,
+stale version pins, and catalog IDs whose retirement or shutdown falls within 30
+days of the run are reported as warnings unless a local asset is clearly missing.
 
 ```sh
 task check:pre-release
@@ -23,15 +24,16 @@ fails on a whole-token match of any catalog id in the public surface: `README.md
 `workflows/` trees. Hits in other first-party files (tests, implementation
 heuristics) are reported as warnings. Tokens treat `-`, `.`, and `_` as part of
 the id when they continue it, so a retired id that is a prefix of a current one
-(for example `gpt-5` vs `gpt-5.6-sol`) does not match, while `gpt-4.` still
-matches. The catalog itself, `scripts/fixtures/pre-release-outdatedness/`, and
+(for example a short `gpt-<n>` id versus a later `gpt-<n>.6-sol` id) does not
+match, while a retired id followed by a sentence period still matches. Matching is case-insensitive for IDs of four or more characters. Shorter IDs stay
+case-sensitive so plan codes do not false-positive. The catalog itself, `scripts/fixtures/pre-release-outdatedness/`, and
 `vendor/` or `node_modules/` paths are skipped.
 
 ### Updating the catalog
 
 1. Open the official deprecation pages:
-   - [Anthropic model deprecations](https://docs.claude.com/en/docs/about-claude/model-deprecations)
-   - [OpenAI deprecations](https://platform.openai.com/docs/deprecations)
+   - [Anthropic model deprecations](https://platform.claude.com/docs/en/about-claude/model-deprecations)
+   - [OpenAI deprecations](https://developers.openai.com/api/docs/deprecations)
 2. Add or update only model ids those pages actually list. Do not invent ids or
    dates. Omit API endpoints and product features that are not model ids.
 3. For each entry set `id`, `provider` (`anthropic` or `openai`), `status`

@@ -43,7 +43,7 @@ The answer with statewright: Yes. `delete_volume` is not in any state's `allowed
 
 ## Alternative Demo Approaches
 
-1. **Use a non-Anthropic model** (GPT-4, Gemini, open-source models via opencode) that may not have the same destructive-action training
+1. **Use a non-Anthropic model** (a GPT-4-class model, Gemini, or an open-source model via opencode) that may not have the same destructive-action training
 2. **Make the task more ambiguous** — "the database is corrupted, clean it up" without specifying how
 3. **Add tool confusion** — more tools with similar names (`reset_volume`, `clean_volume`, `purge_volume`) that could be mistaken for non-destructive
 4. **Time pressure + iteration limit** — with statewright's checkpoint forcing, show that when max_iterations fires, the constrained agent proposes the right fix while the unconstrained agent escalates to destructive actions

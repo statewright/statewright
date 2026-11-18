@@ -1,5 +1,13 @@
 # Fake curl-auth-header fixtures in bearer-redaction tests (not real credentials).
-# Scoped to these exact findings; any new finding still fails the scan.
+# Scoped to these exact findings from a redacted gitleaks 8.30.1 full-tree scan.
+# Four fixture findings: the original three curl-auth-header test allowlist
+# entries, plus the human-interaction header fixture. Working-tree (--no-git)
+# fingerprints are included where the current line differs. The historical
+# experiments/pi-context-ablation/run.sh finding in c4370fc is intentionally
+# not listed and remains a finding.
 373b55b62e157798ae6cc34d72cc640e19b1e097:plugins/claude-code/tests/native-execution.test.mjs:curl-auth-header:72
+plugins/claude-code/tests/native-execution.test.mjs:curl-auth-header:100
 e5384fc019edf1cd6b5edccd748c9adaf7b6b211:plugins/executor/tests/adapter-bridge.test.mjs:curl-auth-header:268
 e5384fc019edf1cd6b5edccd748c9adaf7b6b211:plugins/executor/tests/classifier-approval-controller.test.mjs:curl-auth-header:75
+6c4d38625a613c506ee43ee213a7e0b0992a65fc:plugins/executor/tests/human-interaction.test.mjs:curl-auth-header:47
+plugins/executor/tests/human-interaction.test.mjs:curl-auth-header:47

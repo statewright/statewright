@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {spawnSync} from 'node:child_process';
 import {mkdtempSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -8,8 +9,10 @@ import {
   formatFinding,
   isPublicSurfacePath,
   loadCatalog,
+  repoRootFromScript,
   scanTrackedFiles,
   shouldSkipPath,
+  upcomingRetirementWarnings,
 } from './check-retired-models.mjs';
 
 const catalog = loadCatalog();
@@ -20,6 +23,11 @@ test('catalog includes the verified Anthropic retirement and only retired or dep
   assert.equal(byId['claude-sonnet-4-20250514'].retired_on, '2026-06-15');
   assert.equal(byId['claude-sonnet-4-20250514'].replacement, 'claude-sonnet-5-5');
   assert.ok(catalog.models.every((model) => model.status === 'retired' || model.status === 'deprecated'));
+  assert.equal(catalog.sources.find((source) => source.provider === 'anthropic').url, 'https://platform.claude.com/docs/en/about-claude/model-deprecations');
+  assert.equal(catalog.sources.find((source) => source.provider === 'openai').url, 'https://developers.openai.com/api/docs/deprecations');
+  assert.ok(catalog.models.every((model) => model.source === (model.provider === 'anthropic'
+    ? 'https://platform.claude.com/docs/en/about-claude/model-deprecations'
+    : 'https://developers.openai.com/api/docs/deprecations')));
 });
 
 test('whole-token matching rejects prefix collisions with current ids', () => {
@@ -78,4 +86,43 @@ test('vendor copies are skipped and tests are warnings, not public-surface failu
   assert.equal(isPublicSurfacePath('plugins/pi/src/index.ts'), false);
   assert.equal(isPublicSurfacePath('crates/mcp-gateway/src/usage.rs'), false);
   assert.equal(isPublicSurfacePath('plugins/codex/tests/statewright-codex-tui.test.mjs'), false);
+});
+
+test('model ID matching is case-insensitive and still respects token boundaries', () => {
+  const models = [byId['gpt-5'], byId['claude-sonnet-4-20250514'], byId.o1];
+  const hits = findModelIdMatches('Default is GPT-5, or Claude-Sonnet-4-20250514.', models);
+  assert.deepEqual(hits.map((hit) => `${hit.line}:${hit.id}`), ['1:claude-sonnet-4-20250514', '1:gpt-5']);
+  assert.equal(findModelIdMatches('use GPT-5.6-sol or Claude-Sonnet-5-5', models).length, 0);
+  assert.equal(findModelIdMatches('milestone codes C1, D1, O1, and P1', [byId.o1]).length, 0);
+  assert.equal(findModelIdMatches('the o1 model is retired', [byId.o1]).length, 1);
+});
+
+test('the checker exits 0 against the real worktree', () => {
+  const root = repoRootFromScript();
+  const failures = scanTrackedFiles(root).filter((finding) => isPublicSurfacePath(finding.path));
+  assert.deepEqual(failures, []);
+  const result = spawnSync(process.execPath, [join(root, 'scripts/check-retired-models.mjs')], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('upcoming retirement warnings use a fixed clock and a 30-day inclusive window', () => {
+  const now = new Date(Date.UTC(2026, 10, 15)); // 2026-11-15
+  const catalog = {
+    models: [
+      {id: 'retire-today', provider: 'openai', status: 'deprecated', retired_on: '2026-11-15', source: 'https://example.com', date_checked: '2026-11-18'},
+      {id: 'retire-in-30', provider: 'openai', status: 'deprecated', retired_on: '2026-12-15', source: 'https://example.com', date_checked: '2026-11-18'},
+      {id: 'retire-in-31', provider: 'openai', status: 'deprecated', retired_on: '2026-12-16', source: 'https://example.com', date_checked: '2026-11-18'},
+      {id: 'already-past', provider: 'openai', status: 'deprecated', retired_on: '2026-11-14', source: 'https://example.com', date_checked: '2026-11-18'},
+      {id: 'already-retired', provider: 'anthropic', status: 'retired', retired_on: '2026-12-01', source: 'https://example.com', date_checked: '2026-11-18'},
+      {id: 'no-date', provider: 'anthropic', status: 'deprecated', retired_on: null, source: 'https://example.com', date_checked: '2026-11-18'},
+    ],
+  };
+  const warnings = upcomingRetirementWarnings(catalog, {now});
+  assert.deepEqual(warnings.map((item) => item.id), ['retire-today', 'retire-in-30']);
+  assert.ok(warnings.every((item) => item.severity === 'warn'));
+  assert.match(warnings[0].issue, /retires today \(2026-11-15\)/);
+  assert.match(warnings[1].issue, /retires in 30 days \(2026-12-15\)/);
 });

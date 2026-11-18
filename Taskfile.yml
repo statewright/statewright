@@ -193,7 +193,6 @@ tasks:
   test:
     desc: "Run all workspace tests"
     cmds:
-      - task: check:pre-release
       - "{{.CARGO}} test --workspace"
 
   test:approval-auth:
@@ -253,6 +252,8 @@ tasks:
         msg: "Releases must be from main branch"
       - sh: '[ -z "$(git status --porcelain)" ]'
         msg: "Working directory must be clean"
+      - sh: task check:pre-release
+        msg: "Pre-release outdatedness sweep must pass"
     vars:
       NEXT_VERSION:
         sh: |

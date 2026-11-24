@@ -4,7 +4,7 @@
 
 Your workflows, in the harness you choose. Statewright defines tools, checks, and transitions for each phase of agent work. Use it with Claude Code, Codex, Cursor, OpenCode, Pi, or OMX, or connect a custom MCP host. Tool enforcement and model routing depend on the integration. [Full docs →](https://docs.statewright.ai)
 
-> **Plugin releases:** [Claude 0.4.0](https://github.com/statewright/statewright/releases/tag/claude-v0.4.0) and [Codex 0.4.0](https://github.com/statewright/statewright/releases/tag/codex-v0.4.0). See the [Claude notes](docs/releases/claude-0.4.0.md) and [Codex notes](docs/releases/codex-0.4.0.md). Changes on a development branch are not necessarily included in those packages.
+> **Plugin releases:** [Claude 0.4.1](https://github.com/statewright/statewright/releases/tag/claude-v0.4.1) and [Codex 0.4.0](https://github.com/statewright/statewright/releases/tag/codex-v0.4.0). See the [Claude notes](docs/releases/claude-0.4.1.md) and [Codex notes](docs/releases/codex-0.4.0.md). Changes on a development branch are not necessarily included in those packages.
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 

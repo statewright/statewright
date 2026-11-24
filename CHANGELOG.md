@@ -33,6 +33,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   user's own list) for Statewright credential names. No reconnect is needed;
   restart running managed Codex sessions so their resident picks up the change.
 
+## [Claude Plugin 0.4.1] — 2026-11-24
+
+### Fixed
+- **[claude]** Claude Code 2.1.331 hook compatibility: use supported mod API
+  grammar for session and store calls and top-level Stop helpers. Conversation
+  scope, grant revocation, and approval gate behavior remain intact.
+
 ## [Claude and Codex Plugins 0.3.8] — 2026-11-04
 
 ### Fixed

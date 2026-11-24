@@ -22,7 +22,7 @@ const diagnosticSeen = new Set();
 let diagnosticAttempts = 0;
 function reportDiagnostic($, v, reason, operation, phase) {
   if (['auth', 'desktop_sign_in_required', 'request_aborted'].includes(reason)) return; // Signed-out/cancelled is not a malfunction.
-  const event = diagnosticEvent({ plugin: 'claude-code', version: '0.4.0', platform: 'claude-native',
+  const event = diagnosticEvent({ plugin: 'claude-code', version: '0.4.1', platform: 'claude-native',
     handled: true, context: { mechanism: 'handled', runtime: 'claude-native', reason, operation, phase } });
   const key = JSON.stringify(event.fingerprint);
   if (diagnosticSeen.has(key) || diagnosticAttempts >= 20) return;

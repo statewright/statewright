@@ -75,7 +75,7 @@ const liveApprovalGrants = saved => (Array.isArray(saved) ? saved : [])
 async function approvalGrantScope($) {
   const v = await current($);
   let root;
-  try { root = await $.session.root?.(); } catch { /* Fall back to this conversation. */ }
+  try { root = await $.session.root(); } catch { /* Fall back to this conversation. */ }
   const owner = v.native?.owner_fingerprint;
   return typeof owner === 'string' && /^[a-f0-9]{64}$/.test(owner) && absoluteHostPath(root)
     ? `owner:${owner}:project:${root}` : `conversation:${v.conversation}`;
@@ -100,7 +100,7 @@ async function revokeGrantsAtGateway($) {
   const v = await current($);
   if (!v.control || !/^[a-f0-9]{64}$/.test(v.native?.owner_fingerprint ?? '')) return false;
   let root;
-  try { root = await $.session.root?.(); } catch { /* Revoke the conversation scope. */ }
+  try { root = await $.session.root(); } catch { /* Revoke the conversation scope. */ }
   try {
     const result = await nativeRequest($, 'approval_revoke', absoluteHostPath(root) ? { project_root: root } : {});
     return outcome(result)?.classifier_approval?.action === 'revoked';
@@ -113,12 +113,11 @@ async function revokeApprovalGrants($) {
     ? ' Statewright also revoked them at the gateway, so copies no longer work.'
     : ' Statewright could not revoke them at the gateway; any copy keeps working until it expires (Always: until revoked at the gateway). Try again when connected.';
   if (scope.startsWith('conversation:')) {
-    if (typeof $.store.delete === 'function') await $.store.delete(APPROVAL_GRANTS_KEY);
-    else await $.store.set(APPROVAL_GRANTS_KEY, []);
+    await $.store.delete(APPROVAL_GRANTS_KEY);
     return `Stored timed approvals across all projects were removed from this device.${serverNote}`;
   }
   const remaining = (Array.isArray(saved) ? saved : []).filter(entry => validGrant(entry) && entry.scope !== scope);
-  if (!remaining.length && typeof $.store.delete === 'function') await $.store.delete(APPROVAL_GRANTS_KEY);
+  if (!remaining.length) await $.store.delete(APPROVAL_GRANTS_KEY);
   else await $.store.set(APPROVAL_GRANTS_KEY, remaining);
   return `Stored timed approvals for this project were removed from this device.${serverNote}`;
 }
@@ -297,9 +296,9 @@ async function observedExecutionScope($, tool, input) {
   if (!/^[a-f0-9]{64}$/.test((await current($)).native?.owner_fingerprint ?? ''))
     return { toolInput: input };
   let root, cwd;
-  try { root = await $.session.root?.(); } catch { /* Project scope unavailable. */ }
+  try { root = await $.session.root(); } catch { /* Project scope unavailable. */ }
   if (tool === 'Bash') {
-    try { cwd = await $.session.cwd?.(); } catch { /* Reusable command provenance unavailable. */ }
+    try { cwd = await $.session.cwd(); } catch { /* Reusable command provenance unavailable. */ }
   }
   const projectRoot = absoluteHostPath(root) ? root : undefined;
   if (tool !== 'Bash') return { toolInput: input, projectRoot };
@@ -335,6 +334,21 @@ async function current($) {
   if (typeof id !== 'string' || !id) throw new Error('Conversation unavailable');
   if (id !== view.conversation) { invalidate(view); view = fresh(id); }
   return view;
+}
+function stopSession(e) { return typeof e?.session_id === 'string' && e.session_id ? e.session_id : ''; }
+// The module-level view belongs to one conversation. It may decide a Stop
+// only when that Stop is attributably the same conversation.
+async function stopView($, e) {
+  try { return await current($); } catch {
+    const id = stopSession(e);
+    return id && view.conversation === id ? view : null;
+  }
+}
+// An unexpected Stop handler error allows the stop with a warning; it never
+// decides from the shared module view.
+function failedStop($, result) {
+  reportDiagnostic($, view, 'control_hook_failed', 'stop', 'control');
+  return { ...result, systemMessage: 'Statewright could not check this stop, so it did not hold it. The workflow may still be active: open /statewright to check its state or turn it Off.' };
 }
 const live = async ($, v, epoch) => (await current($)) === v && v.epoch === epoch;
 const redraw = $ => $.ui.invalidate('ui.render');
@@ -1056,18 +1070,8 @@ export function register(on, options = {}) {
   const unconfirmedStop = 'Statewright could not confirm workflow completion. Read its state or turn it Off.';
   const releasedStop = `Statewright could not confirm workflow completion after ${MAX_UNCONFIRMED_STOPS} attempts, so Claude was allowed to stop. The workflow may still be active: open /statewright to check its state or turn it Off.`;
   const unattributedStop = 'Statewright could not tell which conversation is stopping, so it did not hold this stop. Open /statewright to check the workflow state.';
-  const failedStopMessage = 'Statewright could not check this stop, so it did not hold it. The workflow may still be active: open /statewright to check its state or turn it Off.';
   const unconfirmedStops = new Map();
   const enforcingStop = v => Boolean(v?.requiresEnforcement && !v.routeError && !v.native?.state?.pending_approval);
-  const stopSession = e => (typeof e?.session_id === 'string' && e.session_id ? e.session_id : '');
-  // The module-level view belongs to one conversation. It may decide a Stop
-  // only when that Stop is attributably the same conversation.
-  const stopView = async ($, e) => {
-    try { return await current($); } catch {
-      const id = stopSession(e);
-      return id && view.conversation === id ? view : null;
-    }
-  };
   const confirmedStop = conversation => { unconfirmedStops.delete(conversation); };
   const unconfirmed = (e, conversation, result) => {
     const prior = e?.stop_hook_active === false ? 0 : (unconfirmedStops.get(conversation) ?? 0);
@@ -1076,12 +1080,6 @@ export function register(on, options = {}) {
     unconfirmedStops.set(conversation, prior + 1);
     if (unconfirmedStops.size > 256) unconfirmedStops.delete(unconfirmedStops.keys().next().value);
     return { ...result, block: unconfirmedStop };
-  };
-  // An unexpected error in the Stop handler itself allows the stop with a
-  // warning; it never decides from the shared module view.
-  const failedStop = ($, result) => {
-    reportDiagnostic($, view, 'control_hook_failed', 'stop', 'control');
-    return { ...result, systemMessage: failedStopMessage };
   };
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e);

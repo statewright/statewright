@@ -204,7 +204,8 @@ async function host({ startup = true, options = {} } = {}) {
   const elements = Object.fromEntries(['Text', 'Box', 'Button', 'Select', 'Client', 'Svg'].map(type => [type, props => ({ type, props })]));
   const $ = {
     plugin: { root: '/test-plugin', name: 'statewright' },
-    store: { get: async key => stored.get(key), set: async (key, value) => stored.set(key, value) },
+    store: { get: async key => stored.get(key), set: async (key, value) => stored.set(key, value),
+      delete: async key => stored.delete(key) },
     session: { surfaces: async () => state.surfaces ?? ['terminal'], id: async () => state.sessionId ? state.sessionId() : state.session, model: async () => state.model ?? 'claude-opus-5-5' },
     settings: { read: async () => state.settings ?? {} },
     env: { get: async key => key === 'CLAUDE_CODE_NO_MODEL_FALLBACK' ? state.noFallback : state.env?.[key] },
@@ -1165,7 +1166,7 @@ test('disconnected revocation clears all stored tokens and says so', async () =>
   const result = await h.fire('command.run', { command: 'statewright', args: 'approvals revoke' });
   assert.match(result.text, /across all projects/);
   assert.match(result.text, /could not revoke them at the gateway; any copy keeps working until it expires/);
-  assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), []);
+  assert.equal(h.stored.has('classifier-approval-grants:v1'), false);
 });
 
 test('connected revocation clears only the current owner and project', async () => {

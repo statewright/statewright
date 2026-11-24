@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **[claude]** Explicit `STATEWRIGHT_HEADLESS=1` session consent for Claude
+  Code print mode and Agent SDK plugin sessions, with clear missing-consent
+  and missing-authentication errors. This is planned for the 0.5.0 minor
+  release; no version or tag is changed here.
+
 ### Security
 - **[codex]** Remembered classifier approvals are no longer signed with a key
   stored on disk next to the grants. Codex Desktop agents run in

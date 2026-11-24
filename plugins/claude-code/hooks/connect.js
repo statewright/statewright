@@ -62,6 +62,16 @@ function own($, next) { return next.origin?.plugin === $.plugin.name && typeof $
 const flatArgs = ({ tool, tool_use_id, agentId, consent, requestMeta, ...args }) => args;
 const CONTROL_QUESTION = 'Allow Statewright to manage workflows in this conversation? This includes workflow changes and sending tool inputs and results for workflow checks. Claude’s file and command permissions and separate workflow approvals stay in place. This permission ends when the session closes or the plugin reloads.';
 const CONTROL_OPTIONS = ['Allow this session', 'Not now'];
+async function headlessOptIn($) {
+  try { return await $.env.get('STATEWRIGHT_HEADLESS') === '1'; }
+  catch { return false; } // An unavailable host env API cannot grant consent.
+}
+async function noninteractiveSurface($) {
+  try {
+    const surfaces = await $.session.surfaces();
+    return !surfaces.includes('terminal') && !surfaces.includes('desktop');
+  } catch { return false; }
+}
 const APPROVAL_GRANTS_KEY = 'classifier-approval-grants:v1';
 const MAX_APPROVAL_GRANTS = 64;
 const validGrant = entry => entry && typeof entry.scope === 'string' && entry.scope.length > 0 &&
@@ -271,7 +281,8 @@ async function workflowAction($, operation, input = {}, shownRevision, permissio
     return result;
   } catch (error) {
     if (await current($) === v && v.generation === generation) {
-      v.controlError = error?.message || 'Statewright could not complete this action. Refresh and try again.';
+      v.controlError = v.controlError?.startsWith('headless_no_consent:') ? v.controlError
+        : error?.message || 'Statewright could not complete this action. Refresh and try again.';
     }
     throw error;
   } finally { if (await current($) === v && v.generation === generation) { v.actionBusy = false; redraw($); } }
@@ -915,6 +926,16 @@ export function register(on, options = {}) {
         e.tool.endsWith(`__${NATIVE_CONTROL_TOOL}`) && frame?.v === v && frame.generation === v.generation && frame.consentEpoch === v.consentEpoch &&
         (!frame.invocation || frame.invocation === e.tool_use_id) &&
         e.input?.context?.conversation_id === v.conversation && v.connected && !next.signal?.aborted;
+      if (scoped() && await noninteractiveSurface($)) {
+        if (!await headlessOptIn($)) {
+          v.controlError = 'headless_no_consent: set STATEWRIGHT_HEADLESS=1 to grant session workflow consent non-interactively.';
+          return { decision: 'deny', reason: v.controlError };
+        }
+        if (!v.controlConsent) {
+          v.controlConsent = true;
+          $.ui.log('STATEWRIGHT_HEADLESS=1 granted Statewright workflow control consent for this session.');
+        }
+      }
       // Explicit ask rules/hooks and administrator ceilings keep their native
       // path, even after our session grant. Denials were already returned above.
       // A saved gateway ALLOW is not an ask constraint: a newly registered
@@ -925,13 +946,25 @@ export function register(on, options = {}) {
         return required;
       frame.invocation = e.tool_use_id;
       if (!v.controlConsent) {
+        if (await headlessOptIn($)) {
+          v.controlConsent = true;
+          v.notice = 'STATEWRIGHT_HEADLESS=1 granted workflow control consent for this session.';
+          $.ui.log('STATEWRIGHT_HEADLESS=1 granted Statewright workflow control consent for this session.');
+          return { decision: 'allow', reason: 'STATEWRIGHT_HEADLESS=1 granted Statewright workflow control consent for this session.' };
+        }
         if (v.controlQuestion) return { decision: 'deny', reason: 'A Statewright permission question is already waiting for your answer.' };
         const question = { generation: v.generation, epoch: v.consentEpoch, invocation: null };
         v.controlQuestion = question;
         let answer;
         try {
           answer = await $.ui.ask(CONTROL_QUESTION, { header: 'Statewright', options: CONTROL_OPTIONS });
-        } catch { /* Dismissal, cancellation and headless hosts grant nothing. */ }
+        } catch {
+          const surfaces = await $.session.surfaces();
+          if (!surfaces.includes('terminal') && !surfaces.includes('desktop')) {
+            v.controlError = 'headless_no_consent: set STATEWRIGHT_HEADLESS=1 to grant session workflow consent non-interactively.';
+            return { decision: 'deny', reason: v.controlError };
+          }
+        }
         finally { if (v.controlQuestion === question) v.controlQuestion = null; }
         if (await current($) !== v || !scoped()) return { decision: 'deny', reason: 'The Statewright request changed while awaiting your answer.' };
         if (answer !== 'Allow this session') return { decision: 'deny', reason: 'Statewright workflow controls were not approved. No action was sent.' };
@@ -966,11 +999,13 @@ export function register(on, options = {}) {
         pending?.start(); await pending?.promise;
       }
       if (await current($) !== v) return { deny: 'The conversation changed. Request Statewright again here.' };
+      if (!v.connected && v.connectionIssue === 'auth' && await headlessOptIn($))
+        return { result: JSON.stringify({ status: 'headless_no_auth', message: 'headless_no_auth: configure an authenticated native Statewright MCP connection before starting; no interactive sign-in will run.', executionAvailable: false }) };
       if (!v.connected && (v.reloadIssue || v.connectionIssue === 'desktop_sign_in_required'))
         return { result: JSON.stringify({ status: 'action_needed', message: v.error }) };
       try { const result = await workflowAction($, workflowTools.get(e.tool), flatArgs(e), undefined, permission);
         return { result: JSON.stringify({ ...result, client_model_routing: routingView(v) }) }; }
-      catch (error) { await openPane($, false); return { result: JSON.stringify({ status: 'action_needed', message: error.message }) }; }
+      catch (error) { await openPane($, false); return { result: JSON.stringify({ status: 'action_needed', message: v.controlError || error.message }) }; }
     }
     if (!connectTool || e.tool !== connectTool) return executionFor($).call(null, e, next);
     const v = await current($);
@@ -988,12 +1023,15 @@ export function register(on, options = {}) {
     }
     if (await current($) !== v) return { result: JSON.stringify({ status: 'cancelled',
       message: 'The conversation changed. Request Statewright again here.', executionAvailable: false }) };
+    const headless = await headlessOptIn($);
+    if (headless && !v.connected && v.connectionIssue === 'auth') return { result: JSON.stringify({ status: 'headless_no_auth',
+      message: 'headless_no_auth: configure an authenticated native Statewright MCP connection before starting; no interactive sign-in will run.', executionAvailable: false }) };
     if (e.workflow && (!v.connected || v.names.includes(e.workflow))) {
       v.selected = e.workflow;
       v.page = Math.max(0, Math.floor(v.names.indexOf(v.selected) / PAGE_SIZE));
     }
     const placement = await openPane($);
-    if (v.manual && !v.reloadIssue && !v.busy && !v.prompted) {
+    if (!headless && v.manual && !v.reloadIssue && !v.busy && !v.prompted) {
       v.prompted = true;
       v.prompting = true;
       const epoch = v.epoch;
@@ -1003,7 +1041,10 @@ export function register(on, options = {}) {
       try { answer = await $.ui.ask(v.connectionSurface === 'desktop'
         ? 'Open Claude’s MCP connections to sign in to Statewright?'
         : 'Statewright would like to connect. Open sign-in in your browser?',
-        { header: 'Statewright', options: ['Connect', 'Not now'] }); } catch { /* Dismissed/headless: no consent. */ }
+        { header: 'Statewright', options: ['Connect', 'Not now'] }); } catch {
+          const surfaces = await $.session.surfaces();
+          if (!surfaces.includes('terminal') && !surfaces.includes('desktop')) return { result: JSON.stringify({ status: 'headless_no_consent', message: 'headless_no_consent: set STATEWRIGHT_HEADLESS=1 to grant session workflow consent non-interactively.', executionAvailable: false }) };
+        }
       finally { v.prompting = false; }
       if (!await live($, v, epoch)) return { result: JSON.stringify({ status: 'cancelled',
         message: 'The connection request changed. Open /statewright to continue.', executionAvailable: false }) };

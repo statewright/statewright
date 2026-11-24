@@ -1600,6 +1600,52 @@ test('real session consent settles ordinary control asks, never ordinary tool pe
   assert.equal(h.state.asks.length, 2, 'even same-ID startup revokes the grant');
   assert.equal(h.state.calls.length, before);
 });
+test('headless opt-in grants only session workflow control and logs the grant', async () => {
+  const h = await workflowHost();
+  h.state.env = { STATEWRIGHT_HEADLESS: '1' };
+  h.state.rpcPermission = () => ({ decision: 'ask' });
+  h.state.ask = () => { throw new Error('headless host cannot ask'); };
+  const result = await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' });
+  assert.equal(JSON.parse(result.result).state.state, 'work');
+  assert.equal(h.state.asks.length, 0);
+  assert.ok(h.events.some(e => e[0] === 'log' && /STATEWRIGHT_HEADLESS=1/.test(e[1])));
+  assert.equal([...h.stored.keys()].some(k => /headless-consent/.test(k)), false);
+});
+test('headless host without opt-in fails with actionable consent error', async () => {
+  const h = await workflowHost();
+  h.state.surfaces = [];
+  h.state.rpcPermission = () => ({ decision: 'ask' });
+  h.state.ask = () => { throw new Error('headless host cannot ask'); };
+  const before = h.state.calls.length;
+  const result = await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' });
+  assert.match(JSON.stringify(result), /headless_no_consent/);
+  assert.equal(h.state.calls.length, before);
+});
+test('headless native allow still requires explicit opt-in', async () => {
+  const h = await workflowHost();
+  h.state.surfaces = [];
+  h.state.rpcPermission = () => ({ decision: 'allow' });
+  const before = h.state.calls.length;
+  const result = await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' });
+  assert.match(JSON.stringify(result), /headless_no_consent/);
+  assert.equal(h.state.calls.length, before);
+});
+test('headless opt-in with missing saved connection never launches sign-in', async () => {
+  const h = await host();
+  h.state.env = { STATEWRIGHT_HEADLESS: '1' };
+  h.state.connection = { isConnected: false, reason: 'auth' };
+  const result = await h.fire('tool.call', { tool: `mcp__statewright__${h.state.spec.name}` });
+  assert.equal(JSON.parse(result.result).status, 'headless_no_auth');
+  assert.equal(h.state.asks.length, 0);
+  assert.equal(h.state.commands.length, 0);
+});
+test('headless connection failure is not reported as missing authentication', async () => {
+  const h = await host();
+  h.state.env = { STATEWRIGHT_HEADLESS: '1' };
+  h.state.connection = { isConnected: false, reason: 'failed' };
+  const result = await h.fire('tool.call', { tool: `mcp__statewright__${h.state.spec.name}` });
+  assert.notEqual(JSON.parse(result.result).status, 'headless_no_auth');
+});
 for (const policy of [{ decision: 'deny' }, { decision: 'ask', rule: 'explicit ask' },
   { decision: 'ask', hook: 'PreToolUse' }, { decision: 'ask', ceiling: 'ask' }])
   test(`saved gateway allow preserves facade policy ${JSON.stringify(policy)}`, async () => {

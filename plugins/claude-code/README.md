@@ -47,6 +47,26 @@ An existing login can restore without another browser visit. Workflow-control
 consent is scoped to the live session; reloading or closing it clears that grant.
 It does not override file/command permission rules or workflow approvals.
 
+## Headless sessions
+
+Claude Code `-p` and the Agent SDK can load this plugin. For the SDK, pass
+`plugins: [{ type: 'local', path: '/absolute/path/to/plugins/claude-code' }]`
+and `settingSources: ['user', 'project']`. Set `STATEWRIGHT_HEADLESS=1` in the
+Claude process environment to grant workflow-control consent for that session
+without a UI prompt. The plugin logs the grant. This flag does not approve
+ordinary tools, native permission rules, or workflow approval decisions.
+
+Headless runs require an already authenticated native Statewright MCP
+connection, supplied through the host's supported credential configuration.
+The plugin never launches interactive sign-in when the flag is set; missing
+authentication returns `headless_no_auth`. If the host cannot display a
+consent prompt and the flag is absent, it returns `headless_no_consent` with
+the opt-in instruction. The main conversation's model is routed on each
+`turn.step`; subagent requests retain their own model. A backend that cannot
+use the native route can resume the same Claude session with `--resume`,
+`--model`, and `--effort` for each state, after
+checking the current Statewright state.
+
 ## Use a workflow
 
 Limited error diagnostics run automatically through Statewright's self-hosted

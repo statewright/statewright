@@ -1,0 +1,67 @@
+{
+  "models": [
+    {
+      "provider": "anthropic",
+      "line": "fable",
+      "id": "claude-fable-5-2",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "anthropic",
+      "line": "opus",
+      "id": "claude-opus-5-5",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "anthropic",
+      "line": "sonnet",
+      "id": "claude-sonnet-5-5",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "anthropic",
+      "line": "haiku",
+      "id": "claude-haiku-5-5",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "anthropic",
+      "line": "mythos",
+      "id": "claude-mythos-5-2",
+      "source": "https://platform.claude.com/docs/en/models/mythos-5-2/overview",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "openai",
+      "line": "astra",
+      "id": "gpt-6.2-astra",
+      "source": "https://developers.openai.com/api/docs/models",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "openai",
+      "line": "sol",
+      "id": "gpt-6.2-sol",
+      "source": "https://developers.openai.com/api/docs/models",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "openai",
+      "line": "terra",
+      "id": "gpt-6.1-terra",
+      "source": "https://developers.openai.com/api/docs/models",
+      "date_checked": "2026-11-24"
+    },
+    {
+      "provider": "openai",
+      "line": "luna",
+      "id": "gpt-6-luna",
+      "source": "https://developers.openai.com/api/docs/models",
+      "date_checked": "2026-11-24"
+    }
+  ]
+}

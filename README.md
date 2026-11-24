@@ -158,11 +158,11 @@ This configuration excerpt illustrates Haiku for diagnosis, Opus for a proposed 
   "meta": { "default_model": "claude-sonnet-5-5" },
   "states": {
     "diagnose": {
-      "model": "claude-haiku-4-5-20251001",
+      "model": "claude-haiku-5-5",
       "allowed_tools": ["Read", "Bash"]
     },
     "propose_fix": {
-      "model": "anthropic/claude-opus-4-6",
+      "model": "anthropic/claude-opus-5-5",
       "allowed_tools": ["Read"]
     },
     "execute": {
@@ -238,7 +238,7 @@ Full guardrail reference in [the docs](https://docs.statewright.ai/tools/referen
   "states": {
     "planning": {
       "allowed_tools": ["Read", "Grep", "Glob"],
-      "model": "claude-haiku-4-5-20251001",
+      "model": "claude-haiku-5-5",
       "thinking_level": "low",
       "max_iterations": 8,
       "on": { "READY": "implementing" }

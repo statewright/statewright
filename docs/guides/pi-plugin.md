@@ -18,9 +18,9 @@ Define `model` on any state to switch the active model when entering that state:
 
 ```json
 {
-  "meta": { "default_model": "openai-codex/gpt-5.4" },
+  "meta": { "default_model": "openai-codex/gpt-6.2-sol" },
   "states": {
-    "planning": { "model": "openai-codex/gpt-5.5" },
+    "planning": { "model": "openai-codex/gpt-6.2-astra" },
     "implementing": { "model": "ollama-qwen/qwen3.6:35b" },
     "testing": { "model": "ollama/gemma4:31b" }
   }
@@ -36,7 +36,7 @@ Define `model` on any state to switch the active model when entering that state:
 
 `provider/model-id` as registered in Pi's model registry or `~/.pi/agent/models.json`:
 
-- `openai-codex/gpt-5.5` — ChatGPT subscription
+- `openai-codex/gpt-6.2-astra` — ChatGPT subscription
 - `ollama-qwen/qwen3.6:35b` — custom ollama provider
 - `ollama/gemma4:31b` — custom ollama provider
 

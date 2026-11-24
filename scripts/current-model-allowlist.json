@@ -1,0 +1,164 @@
+{
+  "entries": [
+    {
+      "path": "docs/adr/005-app-server-handoff-presentation.md",
+      "id": "gpt-6-astra",
+      "reason": "Preserves the historical design decision and its recorded model route"
+    },
+    {
+      "path": "docs/research/0.3.4-desktop-model-handoff-repair.md",
+      "id": "gpt-6-sol",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/003-hard-interrupt-preface.md",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/011-oh-my-pi-omni-integration.md",
+      "id": "claude-opus-4-8",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/028-observed-route-restoration/affected-tests.txt",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/028-observed-route-restoration/affected-tests.txt",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/028-observed-route-restoration/README.md",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/agentic-engineering-v2-before-20261107.json",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/agentic-engineering-v2-before-20261107.json",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/agentic-engineering-v2-before-20261107.json",
+      "id": "gpt-6-astra",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/classifier-forwardfix-20261107.md",
+      "id": "gpt-6-astra",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/classifier-forwardfix-20261107.md",
+      "id": "gpt-6.1-sol",
+      "reason": "Preserves the dated research record"
+    },
+    {
+      "path": "docs/research/fixtures/graceful-handoff-rejected.patch",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/fixtures/graceful-handoff-rejected.patch",
+      "id": "gpt-6-sol",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/fixtures/native-tool-choice-probe.mjs",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/hard-interrupt-preface-results.json",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves recorded experiment output"
+    },
+    {
+      "path": "docs/research/probes/hard-interrupt-preface-results.json",
+      "id": "gpt-6-astra",
+      "reason": "Preserves recorded experiment output"
+    },
+    {
+      "path": "docs/research/probes/hard-interrupt-roundtrip.mjs",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/hard-interrupt-roundtrip.mjs",
+      "id": "gpt-5.4",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/hard-interrupt-roundtrip.mjs",
+      "id": "gpt-6-astra",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/turn-settings-workaround-results.json",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves recorded experiment output"
+    },
+    {
+      "path": "docs/research/probes/turn-settings-workaround-results.json",
+      "id": "gpt-6-astra",
+      "reason": "Preserves recorded experiment output"
+    },
+    {
+      "path": "docs/research/probes/turn-settings-workaround.mjs",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/turn-settings-workaround.mjs",
+      "id": "gpt-5.4",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/turn-settings-workaround.mjs",
+      "id": "gpt-6-astra",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/probes/turn-settings-tui.mjs",
+      "id": "gpt-5.4",
+      "reason": "Preserves the probe input paired with historical research"
+    },
+    {
+      "path": "docs/research/turbo-parity-20261021/baseline-v2.json",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/turbo-parity-20261021/baseline-v2.json",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/turbo-parity-20261021/baseline-v2.json",
+      "id": "gpt-6-astra",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/turbo-parity-20261021/previous-turbo.json",
+      "id": "gpt-5.6-sol",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/turbo-parity-20261021/previous-turbo.json",
+      "id": "gpt-5.6-terra",
+      "reason": "Preserves a captured historical workflow baseline"
+    },
+    {
+      "path": "docs/research/turbo-parity-20261021/previous-turbo.json",
+      "id": "gpt-6-astra",
+      "reason": "Preserves a captured historical workflow baseline"
+    }
+  ]
+}

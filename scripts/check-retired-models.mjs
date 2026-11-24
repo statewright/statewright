@@ -7,6 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const defaultCatalogPath = join(here, 'retired-model-ids.json');
 export const defaultSkipPathPrefixes = Object.freeze([
   'scripts/retired-model-ids.json',
+  'scripts/current-model-allowlist.json',
   'scripts/fixtures/pre-release-outdatedness/',
 ]);
 const defaultSkipPathSegments = Object.freeze(['vendor', 'node_modules']);
@@ -143,7 +144,7 @@ export function isPublicSurfacePath(path) {
   return hardFailPluginPatterns.some((pattern) => pattern.test(normalized));
 }
 
-function isProbablyBinary(path, bytes) {
+export function isProbablyBinary(path, bytes) {
   const lower = path.toLowerCase();
   const dot = lower.lastIndexOf('.');
   if (dot !== -1 && binaryExtensions.has(lower.slice(dot))) return true;

@@ -1,15 +1,17 @@
 # Pre-release outdatedness sweep
 
 `task check:pre-release` runs a focused public-surface outdatedness sweep before
-a release. Retired or deprecated LLM model IDs on the public surface are a hard
-failure. Dependency audits, older MCP specification dates, documented CLI flags,
-stale version pins, and catalog IDs whose retirement or shutdown falls within 30
-days of the run are reported as warnings unless a local asset is clearly missing.
+a release. Retired or deprecated LLM model IDs and IDs that are no longer the
+latest in their model line are hard failures on the public surface. Dependency
+audits, older MCP specification dates, documented CLI flags, stale version pins,
+catalog IDs whose retirement or shutdown falls within 30 days, and current-model
+catalog entries checked more than 14 days ago are warnings unless a local asset
+is clearly missing.
 
 ```sh
 task check:pre-release
 # or:
-node --test scripts/check-retired-models.test.mjs scripts/pre-release-outdatedness.test.mjs
+node --test scripts/check-retired-models.test.mjs scripts/check-current-models.test.mjs scripts/pre-release-outdatedness.test.mjs
 node scripts/pre-release-outdatedness.mjs
 ```
 
@@ -46,5 +48,40 @@ case-sensitive so plan codes do not false-positive. The catalog itself, `scripts
 5. Run `task check:pre-release` and confirm the tests pass.
 
 When a default, example, or template still names a retired or deprecated model,
-switch it to a current id from the provider's models overview (for Anthropic,
-prefer the current Sonnet id) and record the source in the pull request.
+switch it to the latest ID in the intended line from the provider's models
+overview and record the source in the pull request.
+
+## Latest model in each line
+
+[`scripts/current-models.json`](../../scripts/current-models.json) records one
+latest ID per verified provider line, with its official source URL and
+`date_checked`. The current inventory covers Anthropic's Fable, Opus, Sonnet,
+Haiku, and Mythos lines from the [Claude models overview](https://platform.claude.com/docs/en/about-claude/models/overview),
+and OpenAI's Astra, Sol, Terra, and Luna flagship lines from the [OpenAI models overview](https://developers.openai.com/api/docs/models).
+The Claude overview shows Mythos 5.2 by name; its linked [Mythos model page](https://platform.claude.com/docs/en/models/mythos-5-2/overview)
+provides the exact API ID recorded in the catalog.
+The OpenAI overview does not print exact IDs for its specialized model groups,
+so they are outside this inventory until an official models-page source confirms
+their IDs and line membership.
+
+`scripts/check-current-models.mjs` scans tracked files in the same public scope
+as the retired-ID check. It recognizes provider-qualified routes and Bedrock IDs,
+including the Bedrock version suffix, and checks dated IDs against the catalog's
+latest alias. Bare GPT version IDs fail because the official current catalog
+does not map them to a verified line; choose a specific current line ID instead.
+A public example or workflow using an older ID fails even if that
+ID remains available. A dated historical report can use an explicit exception
+in [`scripts/current-model-allowlist.json`](../../scripts/current-model-allowlist.json).
+Each exception names one path and one ID and gives a reason; it does not exempt
+other files or other IDs in the same file. Use exceptions for immutable release
+notes, migration records, and research evidence, not for active examples or
+workflow defaults.
+
+To refresh the inventory, open both official overviews, verify the latest exact
+ID for every listed line, then update each entry's `id`, `source`, and
+`date_checked` using the date you checked it. Add a line only when its exact ID
+is shown by an official models-page source. Review public-surface failures and
+update active docs, examples, templates, and workflows. Preserve historical
+records through narrow, reasoned allowlist entries. Then run
+`task check:pre-release`; a `date_checked` older than 14 UTC calendar days
+produces a warning so the next release operator knows to recheck the pages.

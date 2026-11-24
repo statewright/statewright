@@ -95,19 +95,19 @@ Use the existing Statewright fields. Exact catalog ids and the semantic family a
 ```json
 {
   "meta": {
-    "default_model": "openai-codex/gpt-5.6-luna"
+    "default_model": "openai-codex/gpt-6-luna"
   },
   "states": {
     "discover": {
-      "model": "openai-codex/gpt-5.6-sol",
+      "model": "openai-codex/gpt-6.2-sol",
       "thinking_level": "high"
     },
     "build": {
-      "model": "openai-codex/gpt-5.6-luna",
+      "model": "openai-codex/gpt-6-luna",
       "thinking_level": "medium"
     },
     "review": {
-      "model": "openai-codex/gpt-5.6-terra",
+      "model": "openai-codex/gpt-6.1-terra",
       "thinking_level": "high"
     }
   }
@@ -131,7 +131,7 @@ To use the same workflow with a local provider and a cloud equivalent, declare a
       "health_url": "https://model.example.invalid/health"
     },
     {
-      "model": "openai-codex/gpt-5.6-luna",
+      "model": "openai-codex/gpt-6-luna",
       "thinking_level": "low"
     }
   ]

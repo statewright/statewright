@@ -31,9 +31,9 @@ tasks:
       - node plugins/claude-code/scripts/sync-runtime.mjs --check
 
   check:pre-release:
-    desc: "Pre-release outdatedness sweep (retired model IDs fail; other findings warn)"
+    desc: "Pre-release outdatedness sweep (retired and non-current public model IDs fail)"
     cmds:
-      - node --test scripts/check-retired-models.test.mjs scripts/pre-release-outdatedness.test.mjs
+      - node --test scripts/check-retired-models.test.mjs scripts/check-current-models.test.mjs scripts/pre-release-outdatedness.test.mjs
       - node scripts/pre-release-outdatedness.mjs
 
   test:plugin-release:

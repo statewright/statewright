@@ -67,3 +67,17 @@ test('sweep report is a hard fail only when a model id or fail-severity finding 
   const catalog = loadCatalog();
   assert.equal(findModelIdMatches('claude-sonnet-5-5', catalog.models).length, 0);
 });
+
+test('the combined sweep reports and fails on a non-current public model', () => {
+  const currentModelFindings = [{
+    category: 'latest-model',
+    path: 'README.md',
+    line: 161,
+    issue: 'claude-haiku-4-5-20251001 is not latest; use claude-haiku-5-5',
+    severity: 'fail',
+  }];
+  const result = {currentModelFindings};
+  assert.equal(sweepHasFailures(result), true);
+  assert.match(formatSweepReport(result), /Models that are not latest in their line: 1/);
+  assert.match(formatSweepReport(result), /README\.md:161/);
+});

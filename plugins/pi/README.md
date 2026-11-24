@@ -41,7 +41,7 @@ In executor mode Pi does not receive the remote Statewright API key. Its control
 Switch models in the active Pi session through Pi's native `setModel()` API. Frontier plans, commodity executes.
 
 ```json
-"planning":      { "model": "openai-codex/gpt-5.5" },
+"planning":      { "model": "openai-codex/gpt-6.2-astra" },
 "implementing":  { "model": "ollama-qwen/qwen3.6:35b" },
 "testing":       { "model": "ollama/gemma4:31b" }
 ```

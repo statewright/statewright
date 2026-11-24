@@ -7,8 +7,8 @@
       "usage_measurement": "observed_only",
       "weekly_budget_enforcement": "operator_observed_not_global",
       "local_first": "casa/qwen3.8-27b",
-      "hosted_routine_fallback": "openai-codex/gpt-5.6-terra",
-      "hosted_critical_fallback": "openai-codex/gpt-5.6-sol"
+      "hosted_routine_fallback": "openai-codex/gpt-6.1-terra",
+      "hosted_critical_fallback": "openai-codex/gpt-6.2-sol"
     }
   },
   "meta": {
@@ -16,7 +16,7 @@
     "task_type": "agentic_engineering",
     "danger_level": "moderate",
     "capture_output": true,
-    "default_model": "openai-codex/gpt-5.6-terra",
+    "default_model": "openai-codex/gpt-6.1-terra",
     "trim_policy": "qwen-first-terra-fallback",
     "frontier_slot_policy": "one-active-slot",
     "weekly_budget_policy": "advisory_until_a_shared_supervisor_gate_exists"
@@ -29,7 +29,7 @@
       "thinking_level": "low",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "low", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "low"}
       ],
       "max_iterations": 2,
       "context_budget_bytes": 12000,
@@ -44,7 +44,7 @@
       "thinking_level": "medium",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
       "context_budget_bytes": 24000,
@@ -59,7 +59,7 @@
       "thinking_level": "medium",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
       "context_budget_bytes": 32000,
@@ -73,7 +73,7 @@
       "thinking_level": "medium",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
       "max_edit_lines": 400,
@@ -85,7 +85,7 @@
     "terra_escalation": {
       "instructions": "This is the explicit hosted recovery lane. Enter only with a compact evidence packet showing that the task crossed an integration boundary or that two materially different Qwen hypotheses failed. For a persistent Qwen App Server thread, restart into an OpenAI-backed transport; cross-provider switching inside that thread is intentionally refused. Resolve the bounded question, then return to the appropriate state.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
-      "model": "openai-codex/gpt-5.6-terra",
+      "model": "openai-codex/gpt-6.1-terra",
       "thinking_level": "medium",
       "max_iterations": 2,
       "context_budget_bytes": 48000,
@@ -99,7 +99,7 @@
       "thinking_level": "medium",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 2,
       "context_budget_bytes": 32000,
@@ -114,7 +114,7 @@
       "thinking_level": "medium",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 1,
       "context_budget_bytes": 36000,
@@ -134,7 +134,7 @@
       "instructions": "Answer only the approved high-consequence review question from the compact evidence packet. This is a single frontier slot, not a second general review. Do not edit, broaden scope, or claim a release decision without the relevant human approval.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
       "allowed_commands": ["git status", "git diff", "git log", "rg", "find", "ls", "pwd"],
-      "model": "openai-codex/gpt-5.6-sol",
+      "model": "openai-codex/gpt-6.2-sol",
       "thinking_level": "high",
       "max_iterations": 1,
       "context_budget_bytes": 36000,
@@ -149,7 +149,7 @@
       "thinking_level": "low",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "low", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "low"}
       ],
       "max_iterations": 2,
       "context_budget_bytes": 18000,
@@ -164,7 +164,7 @@
       "thinking_level": "low",
       "model_ladder": [
         {"model": "casa/qwen3.8-27b", "thinking_level": "low", "health_url": "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL", "requires_provider_switch": true},
-        {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
+        {"model": "openai-codex/gpt-6.1-terra", "thinking_level": "low"}
       ],
       "max_iterations": 1,
       "context_budget_bytes": 16000,

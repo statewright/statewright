@@ -10,6 +10,11 @@ import {
   scanTrackedFiles,
   upcomingRetirementWarnings,
 } from './check-retired-models.mjs';
+import {
+  currentCatalogAgeWarnings,
+  loadCurrentModels,
+  scanCurrentModels,
+} from './check-current-models.mjs';
 
 export const CURRENT_MCP_PROTOCOL_VERSION = '2026-07-28';
 export const CURRENT_MCP_SOURCE = 'https://modelcontextprotocol.io/specification/versioning';
@@ -383,7 +388,12 @@ export function collectDocsAndPinFindings(root, {files} = {}) {
   return findings;
 }
 
-export function runSweep(root, {includeDependencyAudits = true, catalog = loadCatalog(), now} = {}) {
+export function runSweep(root, {
+  includeDependencyAudits = true,
+  catalog = loadCatalog(),
+  currentCatalog = loadCurrentModels(),
+  now,
+} = {}) {
   const modelFindings = scanTrackedFiles(root, {catalog}).map((finding) => ({
     category: 'model-id',
     path: finding.path,
@@ -395,19 +405,30 @@ export function runSweep(root, {includeDependencyAudits = true, catalog = loadCa
     replacement: finding.replacement,
   }));
   const retirementFindings = upcomingRetirementWarnings(catalog, now ? {now} : {});
+  const currentModelFindings = scanCurrentModels(root, {catalog: currentCatalog});
+  const currentCatalogWarnings = currentCatalogAgeWarnings(currentCatalog, now ? {now} : {});
   const docsFindings = collectDocsAndPinFindings(root);
   const dependencyFindings = includeDependencyAudits ? runDependencyAudits(root) : [];
-  return {modelFindings, retirementFindings, docsFindings, dependencyFindings};
+  return {modelFindings, retirementFindings, currentModelFindings, currentCatalogWarnings, docsFindings, dependencyFindings};
 }
 
-export function sweepHasFailures({modelFindings, retirementFindings = [], docsFindings, dependencyFindings}) {
-  return [...modelFindings, ...retirementFindings, ...docsFindings, ...dependencyFindings].some((finding) => finding.severity === 'fail');
+export function sweepHasFailures({
+  modelFindings = [], retirementFindings = [], currentModelFindings = [], currentCatalogWarnings = [],
+  docsFindings = [], dependencyFindings = [],
+}) {
+  return [...modelFindings, ...retirementFindings, ...currentModelFindings, ...currentCatalogWarnings, ...docsFindings, ...dependencyFindings]
+    .some((finding) => finding.severity === 'fail');
 }
 
-export function formatSweepReport({modelFindings, retirementFindings = [], docsFindings, dependencyFindings}) {
+export function formatSweepReport({
+  modelFindings = [], retirementFindings = [], currentModelFindings = [], currentCatalogWarnings = [],
+  docsFindings = [], dependencyFindings = [],
+}) {
   const lines = ['Pre-release outdatedness sweep', ''];
   const sections = [
     ['Retired or deprecated model IDs', modelFindings],
+    ['Models that are not latest in their line', currentModelFindings],
+    ['Current model catalog age (older than 14 days)', currentCatalogWarnings],
     ['Upcoming retirements (within 30 days)', retirementFindings],
     ['Docs, MCP spec, CLI flags, and version pins', docsFindings],
     ['Dependencies (audit / outdated)', dependencyFindings],

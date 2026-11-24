@@ -48,7 +48,7 @@ async function fixture(prefix) {
     writeFile(join(dirname(state), "api_key"), "test-production-key\n", { mode: 0o600 }),
     writeFile(join(dirname(state), "staging_api_key"), "test-staging-key\n", { mode: 0o600 }),
     writeFile(join(dirname(state), "dev_api_key"), "test-development-key\n", { mode: 0o600 }),
-    writeFile(desktopRuntime, `export { desktopProfileEnvironment } from ${JSON.stringify(new URL("../../executor/lib/codex-desktop-app-server-launcher.mjs", import.meta.url).href)};\nexport async function startProfileDesktopMcpBridge({ state, environment }) { if (environment.STATEWRIGHT_API_KEY) throw new Error("inherited credential leak"); return { url: "http://127.0.0.1:43123", token: state.gateway_url + "|fixture-keyring", close: async () => {} }; }\n`),
+    writeFile(desktopRuntime, `export { desktopProfileEnvironment } from ${JSON.stringify(new URL("../scripts/lib/desktop-runtime/codex-desktop-app-server-launcher.mjs", import.meta.url).href)};\nexport async function startProfileDesktopMcpBridge({ state, environment }) { if (environment.STATEWRIGHT_API_KEY) throw new Error("inherited credential leak"); return { url: "http://127.0.0.1:43123", token: state.gateway_url + "|fixture-keyring", close: async () => {} }; }\n`),
   ]);
   return { root, state, vendor, app, applications, wrapper, nativeLauncher };
 }
@@ -473,7 +473,7 @@ test("Desktop launch starts the generated profile app", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", async () => {
+test("Generated Desktop launcher runs with a minimal GUI-like PATH", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-generated-app-");
   const recordPath = join(root, "recorded-codex-cli-path");
   try {
@@ -483,8 +483,8 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
     await writeFile(app, `#!/bin/sh\ntest -f "$CODEX_HOME/auth.json" && test -f "$CODEX_HOME/plugins/fixture-plugin" || exit 29\nprintf '%s|%s|%s|%s|%s|%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" "$STATEWRIGHT_API_KEY" "$STATEWRIGHT_GATEWAY_URL" "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH" "$1" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
     const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
-    const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
-    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", CODEX_ELECTRON_USER_DATA_PATH: "/foreign/user-data" } });
+    // Run the Node launcher directly: the generated app shell displays a macOS alert on failure.
+    await execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", CODEX_ELECTRON_USER_DATA_PATH: "/foreign/user-data" } });
     const laneRoot = join(dirname(state), "desktop-lanes", "production");
     const codexHome = join(root, ".codex");
     const userDataPath = join(laneRoot, "user-data");

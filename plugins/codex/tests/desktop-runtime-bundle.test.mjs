@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { constants } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DESKTOP_RUNTIME_ROOT, PACKAGED_MANAGED_CLIENT, desktopRuntimeDrift } from "../scripts/sync-desktop-runtime.mjs";
+import { persistDesktopRuntime } from "../scripts/statewright-desktop-setup.mjs";
 
 test("Desktop broker runtime is a complete synchronized Codex plugin bundle", async () => {
   assert.deepEqual(await desktopRuntimeDrift(), []);
@@ -34,5 +37,20 @@ test("Desktop broker runtime is a complete synchronized Codex plugin bundle", as
   const mcp = JSON.parse(await readFile("plugins/codex/.mcp.json", "utf8"));
   for (const name of ["STATEWRIGHT_CREDENTIAL_HELPER", "STATEWRIGHT_CREDENTIAL_OS_HOME"]) {
     assert.ok(mcp.mcpServers.statewright.env_vars.includes(name), `MCP must forward ${name}`);
+  }
+});
+
+test("retained Desktop runtime imports without repository dependencies", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "statewright-desktop-retained-import-"));
+  try {
+    const wrapper = await persistDesktopRuntime({
+      pluginRoot: fileURLToPath(new URL("..", import.meta.url)),
+      statePath: join(stateRoot, "desktop.json"),
+    });
+    const broker = join(dirname(wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs");
+    const runtime = await import(pathToFileURL(broker).href);
+    assert.equal(typeof runtime.startProfileDesktopMcpBridge, "function");
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
   }
 });
